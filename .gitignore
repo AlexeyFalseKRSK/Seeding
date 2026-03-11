@@ -1,0 +1,15 @@
+.idea/
+.pytest_cache/
+.venv/
+__pycache__/
+*.pyc
+.coverage
+coverage.xml
+dataset/
+models/
+Photo/
+results/
+seg_out/
+TestProg/
+build/
+dist/
