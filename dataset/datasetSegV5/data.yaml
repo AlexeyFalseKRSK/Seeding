@@ -1,0 +1,16 @@
+
+train:
+  - ../datasetSegV5/train/images
+  - ../datasetV1/train/images
+
+val:
+  - ../datasetSegV5/valid/images
+  - ../datasetV1/valid/images
+
+test:
+  - ../datasetSegV5/test/images
+  - ../datasetV1/test/images
+
+
+names: ['Seeding']
+

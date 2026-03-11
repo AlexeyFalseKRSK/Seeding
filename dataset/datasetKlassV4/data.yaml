@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 3
+names: ['flower', 'root', 'stem']
+
+roboflow:
+  workspace: new-6oin7
+  project: seedingklass-eif0y
+  version: 4
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/new-6oin7/seedingklass-eif0y/dataset/4

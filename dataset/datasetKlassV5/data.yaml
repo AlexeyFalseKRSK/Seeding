@@ -1,0 +1,13 @@
+train: train.txt
+val: val.txt
+test: test.txt
+
+nc: 3
+names: ['flower', 'root', 'stem']
+
+roboflow:
+  workspace: new-6oin7
+  project: seedingklass-eif0y
+  version: 6
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/new-6oin7/seedingklass-eif0y/dataset/6

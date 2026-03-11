@@ -1,0 +1,12 @@
+E:\_JOB_\_Python\Seeding\dataset\datasetSegV6\train\images\Pak2_p1_obj3_Seeding_0_89_png.rf.8f2e693a1e8a065f920f6a53357356cb.jpg
+E:\_JOB_\_Python\Seeding\dataset\datasetSegV6\train\images\Pak1_p1_obj5_Seeding_0_80_png.rf.23171d10f0b97d20b70f017e12ed1721.jpg
+E:\_JOB_\_Python\Seeding\dataset\datasetSegV6\train\images\Pak1_p8_obj20_Seeding_0_70_png.rf.f938e3f021b83bce8258458f1f4e00a3.jpg
+E:\_JOB_\_Python\Seeding\dataset\datasetSegV6\train\images\Pak2_p8_obj1_Seeding_0_93_png.rf.4e7db3136a61957e021c0883fc51a176.jpg
+E:\_JOB_\_Python\Seeding\dataset\datasetSegV6\train\images\Pak2_p7_obj2_Seeding_0_89_png.rf.ce44137ca5e459c76f3060457dbfc4b2.jpg
+E:\_JOB_\_Python\Seeding\dataset\datasetSegV6\train\images\Pak2_p6_obj3_Seeding_0_92_png.rf.d31d7f61bf57524e2084bab9fc043a8e.jpg
+E:\_JOB_\_Python\Seeding\dataset\datasetSegV6\train\images\Pak1_p1_obj16_Seeding_0_42_png.rf.94fb7b43708e31cbb20feb251908df5f.jpg
+E:\_JOB_\_Python\Seeding\dataset\datasetSegV6\train\images\Pak1_p1_obj8_Seeding_0_77_png.rf.d8d8cbe65686d317521ddaec430c3a9d.jpg
+E:\_JOB_\_Python\Seeding\dataset\datasetSegV6\train\images\Pak1_p2_obj1_Seeding_0_87_png.rf.7f761cb2cfe45dda2d512135920fc770.jpg
+E:\_JOB_\_Python\Seeding\dataset\datasetSegV6\train\images\Pak2_p6_obj3_Seeding_0_92_png.rf.67455b1871c6501e4bcf897280294ccd.jpg
+E:\_JOB_\_Python\Seeding\dataset\datasetSegV6\train\images\Pak3_p7_obj2_Seeding_0_87_png.rf.ff36f043bce0faeada4347ad7f2b98f3.jpg
+E:\_JOB_\_Python\Seeding\dataset\datasetSegV6\train\images\Pak2_p17_obj3_Seeding_0_91_png.rf.9e2fb66a553aed7f8b74d13befc0715f.jpg

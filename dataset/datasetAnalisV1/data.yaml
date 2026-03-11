@@ -1,0 +1,22 @@
+# data.yaml для YOLOv8 classification (cls-модель: good/bad корень)
+
+# Абсолютный путь к корневой папке датасета
+path: E:/_JOB_/_Python/Seeding/dataset/datasetAnlisV1
+
+# Относительные пути к папкам (YOLO сам найдёт поддиректории good/bad)
+train: train
+val: valid
+test: test  # опционально, если используешь
+
+# Количество классов и их имена (важно: порядок как в папках!)
+nc: 2
+names:
+  0: bad     # класс "bad"
+  1: good    # класс "good"
+
+# Опционально: можно добавить третий класс, если будет
+# nc: 3
+# names:
+#   0: bad
+#   1: critical
+#   2: good

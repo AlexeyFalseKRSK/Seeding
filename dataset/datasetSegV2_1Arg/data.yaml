@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 6
+names: ['flowerCedr', 'flowerPinus', 'rootCedr', 'rootPinus', 'stemCedr', 'stemPinus']
+
+roboflow:
+  workspace: new-6oin7
+  project: seedingcedrandpinus2
+  version: 2
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/new-6oin7/seedingcedrandpinus2/dataset/2

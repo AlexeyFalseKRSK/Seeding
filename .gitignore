@@ -5,11 +5,14 @@ __pycache__/
 *.pyc
 .coverage
 coverage.xml
-dataset/
-models/
-Photo/
 results/
 seg_out/
 TestProg/
 build/
 dist/
+
+
+
+
+
+

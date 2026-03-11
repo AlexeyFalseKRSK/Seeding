@@ -1,0 +1,12 @@
+train: train.txt
+val: val.txt
+test: test.txt
+nc: 6
+names: ['flowerCedr', 'flowerPinus', 'rootCedr', 'rootPinus', 'stemCedr', 'stemPinus']
+
+roboflow:
+  workspace: new-6oin7
+  project: seedingcedrandpinus
+  version: 2
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/new-6oin7/seedingcedrandpinus/dataset/2

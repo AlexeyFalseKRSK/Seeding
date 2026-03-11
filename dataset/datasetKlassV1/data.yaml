@@ -1,0 +1,13 @@
+train: E:/_JOB_/_Python/Seeding/dataset/datasetKlassV1/train/images
+val: E:/_JOB_/_Python/Seeding/dataset/datasetKlassV1/valid/images
+test: E:/_JOB_/_Python/Seeding/dataset/datasetKlassV1/test/images
+
+nc: 3
+names: ['root', 'seeding', 'stem']
+
+roboflow:
+  workspace: new-6oin7
+  project: seedingdata-p9srd
+  version: 2
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/new-6oin7/seedingdata-p9srd/dataset/2

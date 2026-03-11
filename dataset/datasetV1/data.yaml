@@ -1,0 +1,13 @@
+train: E:\_JOB_\pythonProject\DatasetForML\datasetV1/train/images
+val: E:\_JOB_\pythonProject\DatasetForML\datasetV1/valid/images
+test: E:\_JOB_\pythonProject\DatasetForML\datasetV1/test/images
+
+nc: 1
+names: ['Seeding']
+
+roboflow:
+  workspace: new-6oin7
+  project: seedingdata
+  version: 12
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/new-6oin7/seedingdata/dataset/12

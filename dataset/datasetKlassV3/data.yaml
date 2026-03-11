@@ -1,0 +1,13 @@
+train: E:/_JOB_/_Python/Seeding/dataset/datasetKlassV3/train/images
+val: E:/_JOB_/_Python/Seeding/dataset/datasetKlassV3/valid/images
+test: E:/_JOB_/_Python/Seeding/dataset/datasetKlassV3/test/images
+
+nc: 3
+names: ['flower', 'root', 'stem']
+
+roboflow:
+  workspace: new-6oin7
+  project: seedingklass-eif0y
+  version: 3
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/new-6oin7/seedingklass-eif0y/dataset/3
