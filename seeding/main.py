@@ -1,4 +1,4 @@
-"""Application entry point for the simplified Seeding GUI."""
+"""Точка входа для запуска графического приложения Seeding."""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ from seeding.utils import resolve_weights_path
 
 
 def _resolve_model_path(path_value: str, *, default_path: Path) -> str | None:
+    """Пытается найти путь к модели и при необходимости использует резервный."""
     resolved = resolve_weights_path(path_value, base_dirs=(PROJECT_ROOT, Path.cwd()))
     if resolved is not None:
         return str(resolved)
@@ -33,6 +34,7 @@ def _resolve_model_path(path_value: str, *, default_path: Path) -> str | None:
 
 
 def main() -> None:
+    """Настраивает приложение, проверяет пути к моделям и запускает главное окно."""
     parser = argparse.ArgumentParser(description="Seeding")
     parser.add_argument(
         "--weights",

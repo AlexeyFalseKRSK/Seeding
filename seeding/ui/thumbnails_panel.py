@@ -1,4 +1,4 @@
-"""Thumbnail list for quick page navigation."""
+"""Панель миниатюр для быстрого переключения между страницами."""
 
 from __future__ import annotations
 
@@ -10,13 +10,17 @@ from PyQt5.QtWidgets import QListWidget, QListWidgetItem, QVBoxLayout, QWidget
 
 
 class ThumbnailsPanel(QWidget):
+    """Показывает миниатюры страниц и сообщает об их выборе."""
+
     image_selected = pyqtSignal(int)
 
     def __init__(self, parent=None) -> None:
+        """Создаёт панель миниатюр и собирает её интерфейс."""
         super().__init__(parent)
         self._build_ui()
 
     def _build_ui(self) -> None:
+        """Настраивает список миниатюр и его визуальное поведение."""
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(6)
@@ -34,6 +38,7 @@ class ThumbnailsPanel(QWidget):
         layout.addWidget(self.list_widget)
 
     def set_images(self, images: list[np.ndarray]) -> None:
+        """Заполняет список миниатюрами переданных изображений."""
         self.list_widget.clear()
         for idx, image in enumerate(images):
             item = QListWidgetItem(self._build_icon(image), str(idx + 1))
@@ -42,14 +47,17 @@ class ThumbnailsPanel(QWidget):
             self.list_widget.addItem(item)
 
     def set_active_index(self, index: int) -> None:
+        """Выделяет миниатюру активной страницы по индексу."""
         if 0 <= index < self.list_widget.count():
             self.list_widget.setCurrentRow(index)
 
     def _on_item_clicked(self, item: QListWidgetItem) -> None:
+        """Передаёт наружу индекс страницы, выбранной пользователем по клику."""
         self.image_selected.emit(int(item.data(Qt.UserRole)))
 
     @staticmethod
     def _build_icon(image: np.ndarray) -> QIcon:
+        """Преобразует изображение NumPy в иконку для списка миниатюр."""
         if image is None or not isinstance(image, np.ndarray):
             pix = QPixmap(88, 88)
             pix.fill(Qt.transparent)

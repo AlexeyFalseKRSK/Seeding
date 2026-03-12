@@ -12,6 +12,7 @@ from seeding.ui.main_window import ImageEditor
 
 
 def _ensure_offscreen_qt() -> tuple[QApplication, bool]:
+    """Создаёт `QApplication` в offscreen-режиме для GUI-тестов главного окна."""
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     app = QApplication.instance()
     created = app is None
@@ -21,6 +22,7 @@ def _ensure_offscreen_qt() -> tuple[QApplication, bool]:
 
 
 def _isolate_qsettings(tmp_path) -> None:
+    """Изолирует `QSettings` во временном каталоге теста."""
     QSettings.setDefaultFormat(QSettings.IniFormat)
     QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, str(tmp_path))
     settings = QSettings(QSETTINGS_ORG, QSETTINGS_APP)
@@ -29,15 +31,20 @@ def _isolate_qsettings(tmp_path) -> None:
 
 
 class _StaticBackend:
+    """Заглушка backend, возвращающая заранее подготовленные результаты."""
+
     def __init__(self, results):
+        """Сохраняет результаты, которые должен вернуть тестовый backend."""
         self._results = results
 
     def predict(self, image, *, conf_threshold=None):
+        """Возвращает сохранённые результаты независимо от входного изображения."""
         _ = (image, conf_threshold)
         return self._results
 
 
 def test_append_page_keeps_storage_lists_in_sync():
+    """Проверяет синхронное обновление списков проекта при добавлении страниц."""
     app, created = _ensure_offscreen_qt()
     window = ImageEditor("dummy_weights.pt", "dummy_classify.pt")
     assert window.canvas_stack.currentWidget() is window.empty_state
@@ -59,6 +66,7 @@ def test_append_page_keeps_storage_lists_in_sync():
 
 
 def test_find_seedlings_updates_tree_and_statistics():
+    """Проверяет обновление дерева и статистики после детекции на странице."""
     app, created = _ensure_offscreen_qt()
     window = ImageEditor("dummy_weights.pt", "dummy_classify.pt")
     window._append_page(np.zeros((40, 40, 3), dtype=np.uint8), "page1.png")
@@ -90,6 +98,7 @@ def test_find_seedlings_updates_tree_and_statistics():
 
 
 def test_classify_adds_parts_to_detected_object():
+    """Проверяет добавление частей и маски после классификации объекта."""
     app, created = _ensure_offscreen_qt()
     crop = np.zeros((20, 12, 3), dtype=np.uint8)
     window = ImageEditor("dummy_weights.pt", "dummy_classify.pt")
@@ -140,6 +149,7 @@ def test_classify_adds_parts_to_detected_object():
 
 
 def test_crop_view_renders_part_mask_overlay():
+    """Проверяет отображение масок и bbox частей в режиме просмотра кропа."""
     app, created = _ensure_offscreen_qt()
     crop = np.zeros((20, 12, 3), dtype=np.uint8)
     window = ImageEditor("dummy_weights.pt", "dummy_classify.pt")
@@ -195,6 +205,7 @@ def test_crop_view_renders_part_mask_overlay():
 
 
 def test_create_report_updates_last_report_path(tmp_path, monkeypatch):
+    """Проверяет сохранение пути к последнему отчёту после его создания."""
     app, created = _ensure_offscreen_qt()
     window = ImageEditor("dummy_weights.pt", "dummy_classify.pt")
     window.image_storage.images = [np.zeros((32, 32, 3), dtype=np.uint8)]
@@ -224,6 +235,7 @@ def test_create_report_updates_last_report_path(tmp_path, monkeypatch):
 
 
 def test_pdf_page_titles_include_local_page_numbers():
+    """Проверяет локальную нумерацию страниц для разных PDF-источников."""
     app, created = _ensure_offscreen_qt()
     window = ImageEditor("dummy_weights.pt", "dummy_classify.pt")
 
@@ -241,6 +253,7 @@ def test_pdf_page_titles_include_local_page_numbers():
 
 
 def test_tree_and_statistics_follow_active_page():
+    """Проверяет синхронизацию дерева и статистики с активной страницей."""
     app, created = _ensure_offscreen_qt()
     window = ImageEditor("dummy_weights.pt", "dummy_classify.pt")
     window.image_storage.images = [
@@ -287,6 +300,7 @@ def test_tree_and_statistics_follow_active_page():
 
 
 def test_measure_label_ignores_view_transform():
+    """Проверяет, что подпись измерения не масштабируется вместе с видом."""
     app, created = _ensure_offscreen_qt()
     window = ImageEditor("dummy_weights.pt", "dummy_classify.pt")
     window._append_page(np.zeros((80, 80, 3), dtype=np.uint8), "page1.png")
@@ -306,6 +320,7 @@ def test_measure_label_ignores_view_transform():
 
 
 def test_calibration_restores_per_source_file(tmp_path):
+    """Проверяет раздельное восстановление калибровки для разных файлов."""
     app, created = _ensure_offscreen_qt()
     _isolate_qsettings(tmp_path)
     window = ImageEditor("dummy_weights.pt", "dummy_classify.pt")

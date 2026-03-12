@@ -8,6 +8,7 @@ from seeding.ui.statistics_panel import StatisticsPanel
 
 
 def _ensure_offscreen_qt() -> tuple[QApplication, bool]:
+    """Создаёт `QApplication` в offscreen-режиме для тестов Qt-виджетов."""
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     app = QApplication.instance()
     created = app is None
@@ -17,6 +18,7 @@ def _ensure_offscreen_qt() -> tuple[QApplication, bool]:
 
 
 def _part(name: str, confidence: float = 0.9) -> AllClassImage:
+    """Быстро создаёт тестовый объект части растения для расчёта статистики."""
     return AllClassImage(
         class_name=name,
         confidence=confidence,
@@ -26,6 +28,7 @@ def _part(name: str, confidence: float = 0.9) -> AllClassImage:
 
 
 def test_statistics_split_counts_by_categories():
+    """Проверяет разбиение частей по категориям и расчёт общей статистики."""
     data = OriginalImage(
         images=[np.zeros((20, 20, 3), dtype=np.uint8)],
         class_object_image=[
@@ -68,6 +71,7 @@ def test_statistics_split_counts_by_categories():
 
 
 def test_statistics_panel_renders_summary_labels_and_histogram():
+    """Проверяет обновление текстовых меток и гистограммы в панели статистики."""
     app, created = _ensure_offscreen_qt()
 
     panel = StatisticsPanel()

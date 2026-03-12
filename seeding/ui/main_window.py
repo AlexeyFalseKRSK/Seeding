@@ -1,4 +1,4 @@
-"""Simplified main window for the diploma-focused Seeding workflow."""
+"""Главное окно приложения Seeding с загрузкой, анализом и просмотром результатов."""
 
 from __future__ import annotations
 
@@ -93,15 +93,17 @@ INPUT_FILE_FILTER = (
 
 
 class CanvasGraphicsView(QGraphicsView):
-    """Graphics view with middle-button panning."""
+    """Графический viewport с поддержкой прокрутки средней кнопкой мыши."""
 
     def __init__(self, scene: QGraphicsScene, parent=None) -> None:
+        """Создаёт viewport и подготавливает поля для ручного перемещения холста."""
         super().__init__(scene, parent)
         self._drag_active = False
         self._drag_start_pos = QPoint()
         self._scroll_start_pos = QPoint()
 
     def mousePressEvent(self, event) -> None:
+        """Включает режим перетаскивания холста при нажатии средней кнопки мыши."""
         if event.button() == Qt.MiddleButton:
             self._drag_active = True
             self.setCursor(Qt.ClosedHandCursor)
@@ -115,6 +117,7 @@ class CanvasGraphicsView(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
+        """Перемещает холст вслед за курсором, пока активен режим ручной прокрутки."""
         if self._drag_active:
             delta = event.pos() - self._drag_start_pos
             self.horizontalScrollBar().setValue(self._scroll_start_pos.x() - delta.x())
@@ -124,6 +127,7 @@ class CanvasGraphicsView(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
+        """Завершает ручное перемещение холста после отпускания средней кнопки."""
         if event.button() == Qt.MiddleButton:
             self._drag_active = False
             self.setCursor(Qt.ArrowCursor)
@@ -133,13 +137,14 @@ class CanvasGraphicsView(QGraphicsView):
 
 
 class ImageEditor(QMainWindow):
-    """Main application window with the reduced diploma workflow."""
+    """Главное окно приложения с загрузкой файлов, анализом и просмотром результатов."""
 
     def __init__(
         self,
         weights_path: str,
         classify_weights_path: str | None = None,
     ) -> None:
+        """Инициализирует состояние окна, модели, настройки и основные элементы UI."""
         super().__init__()
         self.weights_path = str(weights_path)
         self.classify_weights_path = str(
@@ -182,6 +187,7 @@ class ImageEditor(QMainWindow):
         self.statusBar().showMessage("Откройте изображение или PDF", 3000)
 
     def _build_ui(self) -> None:
+        """Строит основную компоновку окна, панели, холст и вкладки боковой панели."""
         central = QWidget(self)
         central.setObjectName("appShell")
         self.setCentralWidget(central)
@@ -394,6 +400,7 @@ class ImageEditor(QMainWindow):
         self._update_canvas_status()
 
     def _build_empty_state(self) -> QWidget:
+        """Создаёт заглушку, показываемую на холсте до открытия первого файла."""
         empty_state = QFrame(self)
         empty_state.setObjectName("emptyState")
         layout = QVBoxLayout(empty_state)
@@ -432,11 +439,13 @@ class ImageEditor(QMainWindow):
         return empty_state
 
     def _set_canvas_empty(self, is_empty: bool) -> None:
+        """Переключает центральную область между пустым состоянием и холстом."""
         self.canvas_stack.setCurrentWidget(
             self.empty_state if is_empty else self.graphics_view
         )
 
     def _update_project_summary(self) -> None:
+        """Обновляет краткую сводку проекта по числу страниц и исходных файлов."""
         pages_count = len(self.image_storage.images)
         if pages_count == 0:
             self.project_count_chip.setText("0 страниц")
@@ -447,6 +456,7 @@ class ImageEditor(QMainWindow):
         )
 
     def _page_position_for_source(self, page_index: int) -> tuple[int, int]:
+        """Возвращает локальный номер страницы и их общее число внутри одного источника."""
         source = self._source_file(page_index)
         if not source:
             return page_index + 1, len(self.image_storage.images)
@@ -459,6 +469,7 @@ class ImageEditor(QMainWindow):
         return positions.index(page_index) + 1, len(positions)
 
     def _update_canvas_status(self) -> None:
+        """Обновляет подписи текущей страницы, масштаба и калибровки на панели статуса."""
         if not self.image_storage.images:
             self.canvas_page_label.setText("Нет открытого изображения")
             self.sidebar_page_label.setText("Нет выбранной страницы")
@@ -483,6 +494,7 @@ class ImageEditor(QMainWindow):
             self.scale_status_chip.setText("Без масштаба")
 
     def _normalize_source_key(self, source_file: str | Path | None) -> str | None:
+        """Приводит путь источника к стабильному ключу для хранения калибровок."""
         if not source_file:
             return None
         path = Path(str(source_file).strip()).expanduser()
@@ -492,6 +504,7 @@ class ImageEditor(QMainWindow):
             return str(path)
 
     def _load_calibrations_payload(self) -> dict[str, float]:
+        """Загружает сохранённые коэффициенты калибровки из `QSettings`."""
         raw_value = self._settings.value("file_calibrations", "{}", type=str) or "{}"
         try:
             payload = json.loads(raw_value)
@@ -510,6 +523,7 @@ class ImageEditor(QMainWindow):
         return result
 
     def _save_calibrations_payload(self, payload: dict[str, float]) -> None:
+        """Сохраняет словарь калибровок в `QSettings` в виде JSON."""
         self._settings.setValue(
             "file_calibrations",
             json.dumps(payload, ensure_ascii=False, sort_keys=True),
@@ -517,6 +531,7 @@ class ImageEditor(QMainWindow):
         self._settings.sync()
 
     def _current_source_file(self, index: int | None = None) -> str:
+        """Возвращает путь активного исходного файла или общий путь проекта."""
         source_index = self._active_image_index if index is None else int(index)
         if 0 <= source_index < len(self.image_storage.source_files):
             source = str(self.image_storage.source_files[source_index]).strip()
@@ -525,6 +540,7 @@ class ImageEditor(QMainWindow):
         return str(self.image_storage.file_path or "")
 
     def _save_calibration_for_current_source(self, pixels_per_mm: float) -> None:
+        """Сохраняет калибровку для текущего файла и обновляет состояние окна."""
         self.pixels_per_mm = max(float(pixels_per_mm), 0.0)
         self.app_state.pixels_per_mm = self.pixels_per_mm
         self._settings.setValue("pixels_per_mm", self.pixels_per_mm)
@@ -543,6 +559,7 @@ class ImageEditor(QMainWindow):
         self._update_canvas_status()
 
     def _restore_calibration_for_index(self, index: int | None = None) -> None:
+        """Восстанавливает калибровку для выбранной страницы по пути исходного файла."""
         pixels_per_mm = CALIBRATION_PIXELS_PER_MM_DEFAULT
         source_key = self._normalize_source_key(self._current_source_file(index))
         if source_key is not None:
@@ -555,6 +572,7 @@ class ImageEditor(QMainWindow):
         self._update_canvas_status()
 
     def _set_measure_mode(self, enabled: bool) -> None:
+        """Включает или выключает режим измерения на изображении."""
         if enabled and not self.image_storage.images:
             self._measure_mode = False
             if self.measure_toggle_button.isChecked():
@@ -583,9 +601,11 @@ class ImageEditor(QMainWindow):
                 self._reset_measure_state(clear_items=True)
 
     def toggle_measure_mode(self) -> None:
+        """Переключает режим измерения между активным и неактивным состоянием."""
         self._set_measure_mode(not self._measure_mode)
 
     def _open_calibration_settings(self) -> None:
+        """Открывает диалог ручного ввода коэффициента калибровки для текущего файла."""
         if not self.image_storage.images:
             self._show_info("Нет данных", "Сначала откройте изображение или PDF.")
             return
@@ -617,6 +637,7 @@ class ImageEditor(QMainWindow):
             )
 
     def _start_calibration(self) -> None:
+        """Запускает интерактивную калибровку по измеренному отрезку на изображении."""
         if not self.image_storage.images:
             self._show_info("Калибровка", "Сначала откройте изображение или PDF.")
             return
@@ -632,6 +653,7 @@ class ImageEditor(QMainWindow):
         )
 
     def _reset_measure_state(self, *, clear_items: bool) -> None:
+        """Сбрасывает временные данные измерения и при необходимости удаляет графику."""
         self._measure_start_scene_pos = None
         for attr_name in ("_measure_line_item", "_measure_text_item"):
             item = getattr(self, attr_name, None)
@@ -645,11 +667,13 @@ class ImageEditor(QMainWindow):
             setattr(self, attr_name, None)
 
     def _image_scene_rect(self) -> QRectF:
+        """Возвращает прямоугольник изображения на сцене или пустую область."""
         if self._pixmap_item is None:
             return QRectF()
         return self._pixmap_item.sceneBoundingRect()
 
     def _clamp_scene_pos_to_image(self, scene_pos: QPointF) -> QPointF | None:
+        """Ограничивает точку сцены границами отображаемого изображения."""
         rect = self._image_scene_rect()
         if rect.width() <= 0 or rect.height() <= 0:
             return None
@@ -659,6 +683,7 @@ class ImageEditor(QMainWindow):
         )
 
     def _start_manual_measure(self, scene_pos: QPointF) -> None:
+        """Создаёт линию измерения и запоминает первую точку на сцене."""
         self._reset_measure_state(clear_items=True)
         self._measure_start_scene_pos = scene_pos
         pen = QPen(QColor(46, 226, 201))
@@ -681,6 +706,7 @@ class ImageEditor(QMainWindow):
         self._update_manual_measure(scene_pos)
 
     def _update_manual_measure(self, scene_pos: QPointF) -> None:
+        """Обновляет линию измерения и подпись с текущей длиной отрезка."""
         start = self._measure_start_scene_pos
         if start is None:
             return
@@ -706,6 +732,7 @@ class ImageEditor(QMainWindow):
             self._measure_text_item.setPos(mid_x + 6.0, mid_y + 6.0)
 
     def _apply_calibration_from_measurement(self, diagonal_px: float) -> None:
+        """Переводит измеренный отрезок в коэффициент пиксели-на-миллиметр."""
         if diagonal_px <= 0:
             self.statusBar().showMessage(
                 "Калибровка: отрезок нулевой длины, повторите измерение.",
@@ -746,6 +773,7 @@ class ImageEditor(QMainWindow):
         self._refresh_current_view()
 
     def _finish_manual_measure(self, scene_pos: QPointF) -> None:
+        """Завершает измерение и либо применяет калибровку, либо показывает результат."""
         start = self._measure_start_scene_pos
         if start is None:
             return
@@ -775,6 +803,7 @@ class ImageEditor(QMainWindow):
             )
 
     def eventFilter(self, watched, event):
+        """Обрабатывает колесо мыши и события линейки в области просмотра изображения."""
         if watched is self.graphics_view.viewport():
             if event.type() == QEvent.Wheel and event.modifiers() & Qt.ControlModifier:
                 if event.angleDelta().y() > 0:
@@ -822,6 +851,7 @@ class ImageEditor(QMainWindow):
         return super().eventFilter(watched, event)
 
     def keyPressEvent(self, event) -> None:
+        """Отменяет измерение по `Esc` и передаёт остальные клавиши стандартной обработке."""
         if event.key() == Qt.Key_Escape and (
             self._measure_mode or self._measure_start_scene_pos is not None
         ):
@@ -834,30 +864,36 @@ class ImageEditor(QMainWindow):
         super().keyPressEvent(event)
 
     def _refresh_current_view(self) -> None:
+        """Перерисовывает текущее изображение или кроп без смены выбранного контекста."""
         if not self.image_storage.images:
             return
         self._restore_display(preserve_view=True)
 
     def _set_show_boxes(self, visible: bool) -> None:
+        """Включает или выключает отображение bbox на текущем изображении."""
         self._show_boxes = bool(visible)
         self._refresh_current_view()
 
     def _set_show_masks(self, visible: bool) -> None:
+        """Включает или выключает отображение масок частей на текущем изображении."""
         self._show_masks = bool(visible)
         self._refresh_current_view()
 
     def _set_interaction_mode(self, mode: str) -> None:
+        """Переключает режим взаимодействия с графическими элементами на сцене."""
         if mode not in {"view", "edit_boxes", "edit_masks"}:
             return
         self._interaction_mode = mode
         self._apply_interaction_mode_to_rect_items()
 
     def _apply_interaction_mode_to_rect_items(self) -> None:
+        """Применяет текущий режим редактирования ко всем рамкам на сцене."""
         editable = self._interaction_mode == "edit_boxes"
         for item in self.rect_items:
             item.setEditable(editable)
 
     def _build_toolbar(self) -> None:
+        """Создаёт верхний toolbar с основными действиями приложения."""
         toolbar = QToolBar("Main", self)
         toolbar.setObjectName("mainToolbar")
         toolbar.setMovable(False)
@@ -951,6 +987,7 @@ class ImageEditor(QMainWindow):
         toolbar.addAction(self.action_fit)
 
     def _build_menu(self) -> None:
+        """Создаёт верхнее меню и раскладывает по нему основные действия окна."""
         file_menu = self.menuBar().addMenu("Файл")
         file_menu.addAction(self.action_open)
         file_menu.addAction(self.action_add)
@@ -977,6 +1014,7 @@ class ImageEditor(QMainWindow):
         shortcut: str | QKeySequence | None = None,
         fallback_standard_icon: QStyle.StandardPixmap | None = None,
     ) -> QAction:
+        """Создаёт действие меню или toolbar с иконкой, хоткеем и обработчиком."""
         action = QAction(
             self.icon_manager.get_icon(
                 icon_name,
@@ -991,12 +1029,15 @@ class ImageEditor(QMainWindow):
         return action
 
     def _show_error(self, title: str, text: str) -> None:
+        """Показывает модальное сообщение об ошибке."""
         QMessageBox.critical(self, title, text)
 
     def _show_info(self, title: str, text: str) -> None:
+        """Показывает модальное информационное сообщение."""
         QMessageBox.information(self, title, text)
 
     def _ensure_detection_storage(self) -> None:
+        """Гарантирует наличие списка детекций для всех загруженных страниц."""
         if self.image_storage.class_object_image is None:
             self.image_storage.class_object_image = []
         while len(self.image_storage.class_object_image) < len(
@@ -1005,6 +1046,7 @@ class ImageEditor(QMainWindow):
             self.image_storage.class_object_image.append([])
 
     def _ensure_detect_model(self) -> InferenceBackend | None:
+        """Лениво загружает модель детекции и возвращает её экземпляр."""
         if self.detect_model is not None:
             return self.detect_model
         try:
@@ -1019,6 +1061,7 @@ class ImageEditor(QMainWindow):
             return None
 
     def _ensure_classify_model(self) -> InferenceBackend | None:
+        """Лениво загружает модель классификации частей и возвращает её экземпляр."""
         if self.classify_model is not None:
             return self.classify_model
         try:
@@ -1038,6 +1081,7 @@ class ImageEditor(QMainWindow):
             return None
 
     def clear_project(self) -> None:
+        """Полностью очищает проект, состояние окна и текущие результаты анализа."""
         self.app_state = AppState(image_storage=OriginalImage())
         self.image_storage = self.app_state.image_storage
         self._active_image_index = 0
@@ -1064,6 +1108,7 @@ class ImageEditor(QMainWindow):
         self._update_canvas_status()
 
     def open_image(self) -> None:
+        """Открывает диалог выбора файлов и загружает новый проект с нуля."""
         paths, _ = QFileDialog.getOpenFileNames(
             self,
             "Открыть файлы",
@@ -1076,6 +1121,7 @@ class ImageEditor(QMainWindow):
         self._add_files_from_paths(paths)
 
     def add_files(self) -> None:
+        """Открывает диалог выбора файлов и добавляет их в текущий проект."""
         paths, _ = QFileDialog.getOpenFileNames(
             self,
             "Добавить файлы",
@@ -1087,6 +1133,7 @@ class ImageEditor(QMainWindow):
         self._add_files_from_paths(paths)
 
     def _add_files_from_paths(self, paths: list[str]) -> None:
+        """Загружает набор путей и переключается на первую успешно добавленную страницу."""
         first_new_index: int | None = None
         for path in paths:
             new_indices = self._load_path(path)
@@ -1100,12 +1147,14 @@ class ImageEditor(QMainWindow):
         self._refresh_thumbnails_panel()
 
     def _load_path(self, file_path: str) -> list[int]:
+        """Выбирает способ загрузки файла по его расширению."""
         suffix = Path(file_path).suffix.lower()
         if suffix == ".pdf":
             return self._load_pdf(file_path)
         return self._load_image(file_path)
 
     def _load_image(self, file_path: str) -> list[int]:
+        """Загружает одно изображение с диска и добавляет его как страницу проекта."""
         image = cv2.imread(file_path)
         if image is None:
             self._show_error(
@@ -1117,6 +1166,7 @@ class ImageEditor(QMainWindow):
         return [index]
 
     def _load_pdf(self, pdf_path: str) -> list[int]:
+        """Рендерит PDF постранично в изображения и добавляет их в проект."""
         pages: list[int] = []
         doc = None
         try:
@@ -1166,6 +1216,7 @@ class ImageEditor(QMainWindow):
         return pages
 
     def _append_page(self, image: np.ndarray, source_path: str) -> int:
+        """Добавляет страницу в хранилище проекта и список файлов интерфейса."""
         index = len(self.image_storage.images)
         self.image_storage.images.append(image)
         self.image_storage.source_files.append(source_path)
@@ -1180,6 +1231,7 @@ class ImageEditor(QMainWindow):
         return index
 
     def _page_title(self, page_index: int) -> str:
+        """Формирует заголовок страницы для списка проекта и дерева слоёв."""
         source = self._source_file(page_index)
         source_name = Path(source).name if source else f"page_{page_index + 1}"
         if source.lower().endswith(".pdf"):
@@ -1188,16 +1240,19 @@ class ImageEditor(QMainWindow):
         return f"{page_index + 1}. {source_name}"
 
     def _source_file(self, page_index: int) -> str:
+        """Возвращает путь исходного файла для указанной страницы."""
         if 0 <= page_index < len(self.image_storage.source_files):
             return self.image_storage.source_files[page_index]
         return self.image_storage.file_path
 
     def _on_project_row_changed(self, row: int) -> None:
+        """Реагирует на смену выбранной строки в списке страниц проекта."""
         if row < 0 or row >= len(self.image_storage.images):
             return
         self._select_page(row)
 
     def _select_page(self, page_index: int) -> None:
+        """Делает страницу активной и обновляет связанные элементы интерфейса."""
         if page_index < 0 or page_index >= len(self.image_storage.images):
             return
         self._restore_calibration_for_index(page_index)
@@ -1212,6 +1267,7 @@ class ImageEditor(QMainWindow):
         self._update_canvas_status()
 
     def _refresh_tree(self) -> None:
+        """Перестраивает дерево слоёв для активной страницы проекта."""
         self.tree_widget.blockSignals(True)
         self.tree_widget.clear()
 
@@ -1262,6 +1318,7 @@ class ImageEditor(QMainWindow):
         self.tree_widget.blockSignals(False)
 
     def _refresh_statistics_panel(self) -> None:
+        """Пересчитывает и обновляет панель статистики для текущего контекста."""
         if not self.image_storage.images:
             summary = StatisticsPanel.build_summary(self.image_storage)
         else:
@@ -1284,6 +1341,7 @@ class ImageEditor(QMainWindow):
         self.statistics_panel.set_summary(summary)
 
     def _refresh_thumbnails_panel(self) -> None:
+        """Перестраивает панель миниатюр и выделяет активную страницу."""
         images = [
             image
             for image in self.image_storage.images
@@ -1293,6 +1351,7 @@ class ImageEditor(QMainWindow):
         self.thumbnails_panel.set_active_index(self._active_image_index)
 
     def _on_tree_selection_changed(self) -> None:
+        """Переключает отображение по выбору пользователя в дереве слоёв."""
         item = self.tree_widget.currentItem()
         if item is None:
             return
@@ -1323,6 +1382,7 @@ class ImageEditor(QMainWindow):
         previous_zoom: float | None = None,
         previous_center: QPointF | None = None,
     ) -> None:
+        """Отображает изображение на сцене без добавления bbox и масок."""
         self.graphics_scene.clear()
         self.rect_items = []
         self.mask_items = []
@@ -1377,6 +1437,7 @@ class ImageEditor(QMainWindow):
             self.fit_to_window()
 
     def fit_to_window(self) -> None:
+        """Подгоняет масштаб изображения под размер области просмотра."""
         if self._original_pixmap is None:
             return
         self.zoom_factor = self.min_fit_zoom
@@ -1384,6 +1445,7 @@ class ImageEditor(QMainWindow):
         self.graphics_view.centerOn(self.graphics_scene.sceneRect().center())
 
     def update_image_zoom(self) -> None:
+        """Применяет текущий коэффициент масштаба к виду и сцене."""
         if self._original_pixmap is None:
             return
         self.app_state.zoom_factor = self.zoom_factor
@@ -1404,6 +1466,7 @@ class ImageEditor(QMainWindow):
         *,
         anchor_view_pos: QPoint | None = None,
     ) -> None:
+        """Изменяет масштаб изображения, при необходимости закрепляя его по курсору."""
         if self._original_pixmap is None:
             return
 
@@ -1431,12 +1494,14 @@ class ImageEditor(QMainWindow):
             self.graphics_view.centerOn(previous_center)
 
     def zoom_in(self, *, anchor_view_pos: QPoint | None = None) -> None:
+        """Увеличивает масштаб изображения на фиксированный шаг."""
         self._apply_zoom(
             ZOOM_FACTOR_INCREMENT,
             anchor_view_pos=anchor_view_pos,
         )
 
     def zoom_out(self, *, anchor_view_pos: QPoint | None = None) -> None:
+        """Уменьшает масштаб изображения на фиксированный шаг."""
         self._apply_zoom(
             1.0 / ZOOM_FACTOR_INCREMENT,
             anchor_view_pos=anchor_view_pos,
@@ -1449,6 +1514,7 @@ class ImageEditor(QMainWindow):
         seed_obj: ObjectImage,
         part_obj: AllClassImage,
     ) -> tuple[int, int, int, int] | None:
+        """Переводит локальный bbox части из кропа в координаты исходной страницы."""
         if not seed_obj.bbox or not part_obj.bbox:
             return None
         sx1, sy1, sx2, sy2 = seed_obj.bbox
@@ -1475,6 +1541,7 @@ class ImageEditor(QMainWindow):
         return clip_bbox_to_image(global_bbox, page_width, page_height)
 
     def _part_mask_colors(self, class_name: str | None) -> tuple[QColor, QColor]:
+        """Возвращает цвета заливки и контура маски по типу части растения."""
         value = (class_name or "").strip().lower()
         if value == "root":
             return QColor(52, 199, 89, 80), QColor(52, 199, 89, 210)
@@ -1485,6 +1552,7 @@ class ImageEditor(QMainWindow):
         return QColor(46, 226, 201, 70), QColor(46, 226, 201, 190)
 
     def _add_part_mask_item(self, part_obj: AllClassImage) -> None:
+        """Добавляет на сцену полигон маски классифицированной части растения."""
         polygon = getattr(part_obj, "mask_polygon", None)
         if polygon is None:
             return
@@ -1511,6 +1579,7 @@ class ImageEditor(QMainWindow):
         *,
         preserve_view: bool = False,
     ) -> None:
+        """Показывает страницу или кроп вместе с bbox и масками, если они доступны."""
         if img_idx < 0 or img_idx >= len(self.image_storage.images):
             return
 
@@ -1616,18 +1685,22 @@ class ImageEditor(QMainWindow):
         self._update_canvas_status()
 
     def _seedling_title(self, object_index: int, obj: ObjectImage) -> str:
+        """Возвращает заголовок узла сеянца для дерева слоёв."""
         _ = obj
         return f"Сеянец {object_index + 1}"
 
     def _object_description(self, obj: ObjectImage) -> str:
+        """Формирует краткое описание объекта с уверенностью и bbox."""
         bbox = obj.bbox if obj.bbox else ("-", "-", "-", "-")
         return f"conf={obj.confidence:.2f}, bbox={bbox}"
 
     def _part_description(self, part: AllClassImage) -> str:
+        """Формирует краткое описание части растения с уверенностью и bbox."""
         bbox = part.bbox if part.bbox else ("-", "-", "-", "-")
         return f"conf={part.confidence:.2f}, bbox={bbox}"
 
     def _display_part_name(self, class_name: str | None) -> str:
+        """Преобразует внутреннее имя класса в человекочитаемое название."""
         value = (class_name or "").strip().lower()
         mapping = {
             "root": "Корень",
@@ -1640,6 +1713,7 @@ class ImageEditor(QMainWindow):
         return mapping.get(value, class_name or "Часть")
 
     def _restore_display(self, *, preserve_view: bool = False) -> None:
+        """Восстанавливает ранее выбранный режим показа страницы или кропа."""
         target = self._display_target
         if not target or not self.image_storage.images:
             return
@@ -1656,6 +1730,7 @@ class ImageEditor(QMainWindow):
             )
 
     def find_seedlings(self) -> None:
+        """Запускает детекцию сеянцев на активной странице и обновляет интерфейс."""
         if not self.image_storage.images:
             self._show_info("Нет данных", "Сначала откройте изображение или PDF.")
             return
@@ -1683,6 +1758,7 @@ class ImageEditor(QMainWindow):
         self.statusBar().showMessage(f"Найдено объектов: {len(objects)}", 3000)
 
     def find_all_seedlings(self) -> None:
+        """Выполняет детекцию сеянцев на всех страницах текущего проекта."""
         if not self.image_storage.images:
             self._show_info("Нет данных", "Сначала откройте изображение или PDF.")
             return
@@ -1731,6 +1807,7 @@ class ImageEditor(QMainWindow):
         )
 
     def classify(self) -> None:
+        """Классифицирует части растений внутри найденных объектов проекта."""
         if not self.image_storage.class_object_image or not any(
             self.image_storage.class_object_image
         ):
@@ -1786,6 +1863,7 @@ class ImageEditor(QMainWindow):
         self.statusBar().showMessage("Классификация завершена", 3000)
 
     def rotate_image(self) -> None:
+        """Поворачивает текущую страницу или выбранный кроп и обновляет отображение."""
         if not self.image_storage.images:
             return
 
@@ -1818,6 +1896,7 @@ class ImageEditor(QMainWindow):
         self.statusBar().showMessage("Изображение повернуто", 2000)
 
     def _default_report_dir(self) -> str:
+        """Подбирает каталог по умолчанию для сохранения итогового PDF-отчёта."""
         current_source = self._source_file(self._active_image_index)
         if current_source:
             source_dir = os.path.dirname(current_source)
@@ -1826,6 +1905,7 @@ class ImageEditor(QMainWindow):
         return os.getcwd()
 
     def create_report(self) -> None:
+        """Запрашивает путь сохранения и создаёт PDF-отчёт по текущему проекту."""
         if not self.image_storage.images:
             self._show_info("Нет данных", "Сначала откройте изображение или PDF.")
             return

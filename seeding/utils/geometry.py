@@ -1,9 +1,9 @@
-"""Утилиты обработки изображений и bounding-box.
+"""Утилиты обработки изображений и ограничивающих рамок.
 
 Секции:
-1. Detection helpers (NMS)
-2. Geometry helpers (bbox rotate/clip)
-3. Image transforms (rotation image + boxes)
+1. Помощники детекции (NMS)
+2. Геометрические преобразования рамок
+3. Поворот изображений вместе с рамками
 """
 
 from __future__ import annotations
@@ -92,7 +92,7 @@ def rotate_polygon_points(
     height: int,
     angle: float,
 ) -> np.ndarray | None:
-    """Rotates polygon points with the same transform as image rotation."""
+    """Поворачивает точки полигона тем же преобразованием, что и изображение."""
     if points is None or width <= 0 or height <= 0:
         return None
 

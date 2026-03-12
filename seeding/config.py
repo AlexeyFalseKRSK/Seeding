@@ -1,4 +1,4 @@
-"""Application configuration for the simplified Seeding GUI."""
+"""Конфигурация графического приложения Seeding."""
 
 from __future__ import annotations
 

@@ -6,6 +6,7 @@ from seeding.ui.icon_manager import IconManager
 
 
 def test_icon_manager_has_expected_resources():
+    """Проверяет наличие обязательных файлов иконок в ресурсах приложения."""
     assert IconManager.has_icon_resource("action_open.svg")
     assert IconManager.has_icon_resource("action_detect.svg")
     assert IconManager.has_icon_resource("action_report.svg")
@@ -13,6 +14,7 @@ def test_icon_manager_has_expected_resources():
 
 
 def test_icon_manager_returns_fallback_icon():
+    """Проверяет загрузку fallback-иконки и корректную выдачу реального ресурса."""
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     app = QApplication.instance()
     created_app = app is None

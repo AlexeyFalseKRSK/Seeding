@@ -7,6 +7,7 @@ from seeding.ui.tree_widget import LayerTreeWidget
 
 
 def _ensure_offscreen_qt() -> tuple[QApplication, bool]:
+    """Создаёт `QApplication` в offscreen-режиме для тестов дерева слоёв."""
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     app = QApplication.instance()
     created = app is None
@@ -16,6 +17,7 @@ def _ensure_offscreen_qt() -> tuple[QApplication, bool]:
 
 
 def test_tree_widget_stores_payload_and_confidence_metadata():
+    """Проверяет сохранение payload и confidence в пользовательских ролях дерева."""
     app, created = _ensure_offscreen_qt()
 
     tree = LayerTreeWidget()
@@ -61,6 +63,7 @@ def test_tree_widget_stores_payload_and_confidence_metadata():
 
 
 def test_tree_widget_has_two_columns_and_non_editable_items():
+    """Проверяет базовую конфигурацию дерева: колонки и запрет редактирования."""
     app, created = _ensure_offscreen_qt()
 
     tree = LayerTreeWidget()

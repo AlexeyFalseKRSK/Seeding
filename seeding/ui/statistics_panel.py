@@ -1,4 +1,4 @@
-"""Compact statistics panel for the simplified Seeding GUI."""
+"""Компактная панель статистики для интерфейса Seeding."""
 
 from __future__ import annotations
 
@@ -12,6 +12,8 @@ from seeding.models import OriginalImage
 
 @dataclass(frozen=True)
 class StatisticsSummary:
+    """Хранит агрегированную статистику по страницам, объектам и частям растений."""
+
     pages_count: int = 0
     objects_count: int = 0
     seedlings_count: int = 0
@@ -26,7 +28,10 @@ class StatisticsSummary:
 
 
 class StatisticsPanel(QWidget):
+    """Показывает сводную статистику по текущей странице или всему проекту."""
+
     def __init__(self, parent=None) -> None:
+        """Создаёт панель статистики и заполняет её начальной пустой сводкой."""
         super().__init__(parent)
         self.setObjectName("statisticsPanel")
         self._summary = StatisticsSummary()
@@ -34,6 +39,7 @@ class StatisticsPanel(QWidget):
         self.set_summary(self._summary)
 
     def _build_ui(self) -> None:
+        """Строит интерфейс панели со сводными метками и гистограммой уверенности."""
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(12)
@@ -98,6 +104,7 @@ class StatisticsPanel(QWidget):
 
     @staticmethod
     def build_summary(data: OriginalImage) -> StatisticsSummary:
+        """Считает агрегированную статистику по изображениям, объектам и их частям."""
         pages_count = len(data.images)
         objects: list = []
         if data.class_object_image:
@@ -150,6 +157,7 @@ class StatisticsPanel(QWidget):
 
     @staticmethod
     def _normalize_part_name(name: str | None) -> str:
+        """Приводит разные названия частей растения к общим категориям."""
         value = (name or "").strip().lower()
         if value in {"соцветие", "цветок", "flower", "inflorescence"}:
             return "inflorescence"
@@ -160,6 +168,7 @@ class StatisticsPanel(QWidget):
         return "other"
 
     def set_summary(self, summary: StatisticsSummary) -> None:
+        """Применяет рассчитанную сводку к текстовым полям и гистограмме панели."""
         self._summary = summary
         self.pages_label.setText(f"Страниц: {summary.pages_count}")
         self.objects_label.setText(f"Объектов: {summary.objects_count}")

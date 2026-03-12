@@ -1,4 +1,4 @@
-"""Core services for image processing, detection, classification and reports."""
+"""Сервисы обработки изображений, детекции, классификации и отчётов."""
 
 from __future__ import annotations
 
@@ -18,11 +18,14 @@ from seeding.utils import (
 
 
 class ImageService:
+    """Выполняет операции со страницами, кропами объектов и их синхронизацией."""
+
     @staticmethod
     def _iter_page_objects(
         image_storage: OriginalImage,
         page_index: int,
     ) -> list[ObjectImage]:
+        """Возвращает объекты указанной страницы или пустой список при их отсутствии."""
         if (
             not image_storage.class_object_image
             or page_index >= len(image_storage.class_object_image)
@@ -38,6 +41,7 @@ class ImageService:
         rotate_k: int,
         clear_classification: bool,
     ) -> None:
+        """Пересобирает кропы объектов страницы по текущим bbox и настройкам поворота."""
         page_objects = self._iter_page_objects(image_storage, page_index)
         if not page_objects:
             return
@@ -81,6 +85,7 @@ class ImageService:
         angle: float,
         rotate_k: int,
     ) -> np.ndarray:
+        """Поворачивает страницу, обновляет bbox объектов и пересобирает их кропы."""
         page_image = image_storage.images[page_index]
         if page_image is None:
             raise ValueError("Изображение страницы пустое")
@@ -120,6 +125,7 @@ class ImageService:
         angle: float,
         rotate_k: int,
     ) -> np.ndarray:
+        """Поворачивает кроп объекта, его bbox частей и связанные маски сегментации."""
         page_objects = self._iter_page_objects(image_storage, page_index)
         obj = page_objects[crop_index]
         if not obj.image or obj.image[0] is None:
@@ -162,6 +168,7 @@ class ImageService:
         crop_image: np.ndarray,
         bbox: tuple[int, int, int, int],
     ) -> tuple[int, int, int, int] | None:
+        """Ограничивает локальный bbox размерами кропа объекта."""
         height, width = crop_image.shape[:2]
         return clip_bbox_to_image(bbox, width, height)
 
@@ -170,6 +177,7 @@ class ImageService:
         image: np.ndarray,
         bbox: tuple[int, int, int, int],
     ) -> np.ndarray:
+        """Вырезает прямоугольную область изображения по указанному bbox."""
         x1, y1, x2, y2 = bbox
         return image[y1:y2, x1:x2]
 
@@ -178,10 +186,12 @@ class ImageService:
         image: np.ndarray,
         boxes: Iterable[tuple[int, int, int, int]],
     ) -> list[tuple[int, int, int, int] | None]:
+        """Ограничивает список bbox размерами изображения."""
         height, width = image.shape[:2]
         return [clip_bbox_to_image(box, width, height) for box in boxes]
 
     def sync_crops_and_parts(self, image_storage: OriginalImage) -> None:
+        """Синхронизирует изображения объектов и частей после изменения координат."""
         if not image_storage.images or not image_storage.class_object_image:
             return
 
@@ -253,6 +263,8 @@ class ImageService:
 
 
 class DetectionService:
+    """Строит доменные объекты сеянцев по результатам работы модели детекции."""
+
     @staticmethod
     def build_objects(
         image: np.ndarray,
@@ -262,6 +274,7 @@ class DetectionService:
         iou_threshold: float,
         rotate_k: int,
     ) -> list[ObjectImage]:
+        """Фильтрует детекции, применяет NMS и формирует список объектов сеянцев."""
         if image is None or results is None or not results:
             return []
 
@@ -326,12 +339,15 @@ class DetectionService:
 
 
 class ClassificationService:
+    """Преобразует результаты классификации частей в доменные объекты проекта."""
+
     @staticmethod
     def _clip_mask_polygon(
         mask_polygon: np.ndarray | None,
         width: int,
         height: int,
     ) -> np.ndarray | None:
+        """Ограничивает полигон маски размерами изображения части."""
         if mask_polygon is None or width <= 0 or height <= 0:
             return None
         polygon = np.asarray(mask_polygon, dtype=np.float32)
@@ -344,6 +360,7 @@ class ClassificationService:
 
     @staticmethod
     def build_parts(crop_image: np.ndarray, results) -> list[AllClassImage]:
+        """Собирает части растения из результатов модели для одного кропа объекта."""
         if crop_image is None or results is None or not results:
             return []
 
@@ -388,8 +405,11 @@ class ClassificationService:
 
 
 class ReportService:
+    """Инкапсулирует создание итогового PDF-отчёта по данным проекта."""
+
     @staticmethod
     def generate_report(data: OriginalImage, output_path: str) -> str:
+        """Создаёт PDF-отчёт и возвращает путь к сохранённому файлу."""
         create_pdf_report(data, output_path)
         return output_path
 
