@@ -21,7 +21,7 @@ def test_icon_manager_returns_fallback_icon():
     if app is None:
         app = QApplication([])
     manager = IconManager(QWidget())
-    icon = manager.icon(
+    icon = manager.get_icon(
         "missing_icon.svg",
         fallback_standard_icon=QStyle.SP_FileIcon,
     )

@@ -43,18 +43,6 @@ class IconManager:
             return self._widget.style().standardIcon(fallback_standard_icon)
         return QIcon()
 
-    def icon(
-        self,
-        name: str,
-        *,
-        fallback_standard_icon: QStyle.StandardPixmap | None = None,
-    ) -> QIcon:
-        """Совместимый алиас для старого API."""
-        return self.get_icon(
-            name,
-            fallback_standard_icon=fallback_standard_icon,
-        )
-
     @staticmethod
     def has_icon_resource(name: str) -> bool:
         """Проверяет наличие файла иконки в ресурсах."""

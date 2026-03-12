@@ -20,12 +20,3 @@ def build_main_stylesheet(theme: str = "dark") -> str:
     if not path.is_file():
         path = _style_path("dark")
     return path.read_text(encoding="utf-8")
-
-
-def build_dialog_stylesheet(theme: str = "dark") -> str:
-    """Возвращает QSS для диалогов."""
-    return build_main_stylesheet(theme)
-
-
-MAIN_STYLESHEET = build_main_stylesheet("dark")
-DIALOG_STYLESHEET = build_dialog_stylesheet("dark")

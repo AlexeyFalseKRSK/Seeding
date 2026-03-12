@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Iterable
-
 import numpy as np
 
 from seeding.models import AllClassImage, ObjectImage, OriginalImage
 from seeding.report import create_pdf_report
 from seeding.utils import (
     clip_bbox_to_image,
-    rotate_bbox,
     rotate_image_and_boxes,
     rotate_polygon_points,
     simple_nms,
@@ -162,104 +159,6 @@ class ImageService:
                     angle,
                 )
         return rotated_crop
-
-    @staticmethod
-    def clip_local_bbox(
-        crop_image: np.ndarray,
-        bbox: tuple[int, int, int, int],
-    ) -> tuple[int, int, int, int] | None:
-        """Ограничивает локальный bbox размерами кропа объекта."""
-        height, width = crop_image.shape[:2]
-        return clip_bbox_to_image(bbox, width, height)
-
-    @staticmethod
-    def crop_region(
-        image: np.ndarray,
-        bbox: tuple[int, int, int, int],
-    ) -> np.ndarray:
-        """Вырезает прямоугольную область изображения по указанному bbox."""
-        x1, y1, x2, y2 = bbox
-        return image[y1:y2, x1:x2]
-
-    @staticmethod
-    def clip_many(
-        image: np.ndarray,
-        boxes: Iterable[tuple[int, int, int, int]],
-    ) -> list[tuple[int, int, int, int] | None]:
-        """Ограничивает список bbox размерами изображения."""
-        height, width = image.shape[:2]
-        return [clip_bbox_to_image(box, width, height) for box in boxes]
-
-    def sync_crops_and_parts(self, image_storage: OriginalImage) -> None:
-        """Синхронизирует изображения объектов и частей после изменения координат."""
-        if not image_storage.images or not image_storage.class_object_image:
-            return
-
-        for page_index, objects in enumerate(image_storage.class_object_image):
-            if page_index >= len(image_storage.images):
-                continue
-            base_img = image_storage.images[page_index]
-            height, width = base_img.shape[:2]
-            for obj in objects:
-                if obj.bbox:
-                    clipped_obj = clip_bbox_to_image(obj.bbox, width, height)
-                    if clipped_obj is None:
-                        obj.image = []
-                        obj.bbox = None
-                        continue
-                    x1, y1, x2, y2 = clipped_obj
-                    obj.bbox = clipped_obj
-                    crop = base_img[y1:y2, x1:x2].copy()
-                    if getattr(obj, "rotation_k", 0):
-                        crop = np.rot90(crop, k=obj.rotation_k)
-                    obj.image = [crop]
-
-                if not obj.image_all_class:
-                    continue
-
-                rotation_k = getattr(obj, "rotation_k", 0) % 4
-                crop_height, crop_width = (
-                    obj.image[0].shape[:2] if obj.image else (0, 0)
-                )
-                for cls_obj in obj.image_all_class:
-                    if not cls_obj.bbox:
-                        continue
-
-                    lx1, ly1, lx2, ly2 = cls_obj.bbox
-                    if rotation_k and crop_height and crop_width:
-                        ux1, uy1, ux2, uy2 = rotate_bbox(
-                            lx1,
-                            ly1,
-                            lx2,
-                            ly2,
-                            crop_width,
-                            crop_height,
-                            (-rotation_k) % 4,
-                        )
-                    else:
-                        ux1, uy1, ux2, uy2 = lx1, ly1, lx2, ly2
-
-                    if obj.bbox:
-                        gx1 = obj.bbox[0] + ux1
-                        gy1 = obj.bbox[1] + uy1
-                        gx2 = obj.bbox[0] + ux2
-                        gy2 = obj.bbox[1] + uy2
-                    else:
-                        gx1, gy1, gx2, gy2 = ux1, uy1, ux2, uy2
-
-                    clipped_part = clip_bbox_to_image(
-                        (gx1, gy1, gx2, gy2),
-                        width,
-                        height,
-                    )
-                    if clipped_part is None:
-                        cls_obj.image = np.empty((0, 0, 3), dtype=base_img.dtype)
-                        continue
-                    gx1, gy1, gx2, gy2 = clipped_part
-                    part = base_img[gy1:gy2, gx1:gx2].copy()
-                    if rotation_k:
-                        part = np.rot90(part, k=rotation_k)
-                    cls_obj.image = part
 
 
 class DetectionService:

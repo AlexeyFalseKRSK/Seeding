@@ -89,20 +89,3 @@ def resolve_weights_path(
         return Path(expanded.name)
 
     return None
-
-
-def ensure_dir(path_value: str | Path) -> Path:
-    """Создаёт директорию при необходимости и возвращает абсолютный путь.
-
-    Args:
-        path_value: Путь к каталогу.
-
-    Returns:
-        Path: Абсолютный путь к каталогу.
-
-    Raises:
-        OSError: Если каталог нельзя создать.
-    """
-    directory = Path(path_value).expanduser()
-    directory.mkdir(parents=True, exist_ok=True)
-    return directory.resolve()

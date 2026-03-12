@@ -41,8 +41,6 @@ class OriginalImage:
     file_path: str = ""
     source_files: list[str] = field(default_factory=list)
     images: list[np.ndarray | Image.Image] = field(default_factory=list)
-    masks: list[np.ndarray | Image.Image] = field(default_factory=list)
-    final_images: list[np.ndarray | Image.Image] = field(default_factory=list)
     class_object_image: list[list[ObjectImage]] | None = None
 
 

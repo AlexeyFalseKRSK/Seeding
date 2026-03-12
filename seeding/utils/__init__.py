@@ -12,7 +12,7 @@ from .geometry import (
     rotate_polygon_points,
     simple_nms,
 )
-from .paths import ensure_dir, resolve_weights_path
+from .paths import resolve_weights_path
 
 __all__ = [
     "simple_nms",
@@ -21,5 +21,4 @@ __all__ = [
     "rotate_image_and_boxes",
     "rotate_polygon_points",
     "resolve_weights_path",
-    "ensure_dir",
 ]

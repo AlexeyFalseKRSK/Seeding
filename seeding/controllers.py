@@ -5,8 +5,6 @@
 
 from __future__ import annotations
 
-from typing import Sequence
-
 from seeding.config import DETECTION_CLASS_NAME, NMS_IOU_THRESHOLD, ROTATE_K
 from seeding.models import (
     AllClassImage,
@@ -44,12 +42,6 @@ class AppController:
         self.classification_service = (
             classification_service or ClassificationService()
         )
-
-    @staticmethod
-    def open_files(state: AppState, paths: Sequence[str]) -> None:
-        """Обновляет метаданные состояния при открытии набора файлов."""
-        if paths:
-            state.image_storage.file_path = str(paths[0])
 
     def rotate_selection(
         self,
@@ -163,10 +155,6 @@ class AppController:
         )
         selected_object.image_all_class = parts
         return parts
-
-    def save_crops(self, state: AppState) -> None:
-        """Синхронизирует bbox, кропы объектов и кропы частей."""
-        self.image_service.sync_crops_and_parts(state.image_storage)
 
     def generate_report(self, state: AppState, output_path: str) -> str:
         """Генерирует отчёт и сохраняет путь в состоянии приложения."""
