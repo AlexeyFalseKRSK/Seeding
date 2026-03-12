@@ -4,9 +4,11 @@
 __pycache__/
 *.pyc
 .coverage
-coverage.xml
-results/
-seg_out/
-TestProg/
-build/
-dist/
+
+
+
+
+
+
+
+

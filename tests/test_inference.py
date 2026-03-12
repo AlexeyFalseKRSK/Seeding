@@ -22,10 +22,20 @@ class _BoxStub:
         self.xyxy = [_TensorStub(xyxy)]
 
 
+class _MasksStub:
+    def __init__(self, polygons):
+        self.xy = polygons
+
+
 class _ResultStub:
-    def __init__(self):
+    def __init__(self, with_masks: bool = False):
         self.names = {0: "seedling", 1: "root"}
         self.boxes = [_BoxStub(1, 0.82, [10.0, 20.0, 40.0, 60.0])]
+        self.masks = (
+            _MasksStub([np.array([[10.0, 20.0], [40.0, 20.0], [25.0, 60.0]])])
+            if with_masks
+            else None
+        )
 
 
 def test_infer_backend_kind_uses_pt_only():
@@ -56,3 +66,15 @@ def test_inference_box_exposes_xyxy_and_xywh_adapters():
 
     assert box.xyxy[0].cpu().numpy().tolist() == [10.0, 20.0, 34.0, 44.0]
     assert box.xywh[0].cpu().numpy().tolist() == [22.0, 32.0, 24.0, 24.0]
+
+
+def test_normalize_yolo_results_preserves_mask_polygon():
+    results = normalize_yolo_results([_ResultStub(with_masks=True)])
+
+    box = results[0].boxes[0]
+    assert box.mask_polygon is not None
+    assert box.mask_polygon.shape == (3, 2)
+    assert np.allclose(
+        box.mask_polygon,
+        np.array([[10.0, 20.0], [40.0, 20.0], [25.0, 60.0]], dtype=np.float32),
+    )

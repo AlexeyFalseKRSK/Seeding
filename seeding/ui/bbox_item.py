@@ -15,8 +15,6 @@ from PyQt5.QtWidgets import (
 
 import seeding.config as cfg
 
-BBOX_PEN_WIDTH = 3
-
 
 def get_color_by_confidence(conf: float) -> QColor:
     """Возвращает цвет рамки по уровню уверенности."""
@@ -68,7 +66,7 @@ class BBoxItem(QGraphicsRectItem):
             self._pixels_per_mm = 0.0
 
         color = get_color_by_confidence(getattr(obj, "confidence", 0.0))
-        self.setPen(QPen(color, BBOX_PEN_WIDTH))
+        self.setPen(QPen(color, cfg.UI_BBOX_PEN_WIDTH))
 
         self.setFlags(
             QGraphicsItem.ItemIsSelectable
@@ -117,7 +115,7 @@ class BBoxItem(QGraphicsRectItem):
         if self._highlighted:
             painter.save()
             painter.setBrush(Qt.NoBrush)
-            painter.setPen(QPen(QColor(255, 255, 255), BBOX_PEN_WIDTH + 1))
+            painter.setPen(QPen(QColor(255, 255, 255), cfg.UI_BBOX_PEN_WIDTH + 1))
             painter.drawRect(self.rect())
             painter.restore()
         self._draw_overlay_labels(painter)
@@ -204,9 +202,11 @@ class BBoxItem(QGraphicsRectItem):
         painter.save()
         font = painter.font()
         if font.pointSize() > 0:
-            font.setPointSize(max(7, min(9, font.pointSize())))
+            font.setPointSize(
+                max(cfg.UI_BBOX_LABEL_FONT_POINT_SIZE, font.pointSize())
+            )
         else:
-            font.setPixelSize(11)
+            font.setPixelSize(cfg.UI_BBOX_LABEL_FONT_PIXEL_SIZE)
         font.setBold(True)
         painter.setFont(font)
         fm = painter.fontMetrics()

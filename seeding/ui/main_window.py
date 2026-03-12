@@ -13,7 +13,17 @@ import cv2
 import fitz
 import numpy as np
 from PyQt5.QtCore import QEvent, QPoint, QPointF, QRectF, QSettings, QSize, Qt
-from PyQt5.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QPixmap, QTransform
+from PyQt5.QtGui import (
+    QBrush,
+    QColor,
+    QImage,
+    QKeySequence,
+    QPainter,
+    QPen,
+    QPixmap,
+    QPolygonF,
+    QTransform,
+)
 from PyQt5.QtWidgets import (
     QAction,
     QFrame,
@@ -145,6 +155,10 @@ class ImageEditor(QMainWindow):
         self._pixmap_item: QGraphicsPixmapItem | None = None
         self._original_pixmap: QPixmap | None = None
         self.rect_items: list[BBoxItem] = []
+        self.mask_items: list[QGraphicsItem] = []
+        self._show_boxes = True
+        self._show_masks = True
+        self._interaction_mode = "view"
         self.zoom_factor = 1.0
         self.min_fit_zoom = 1.0
         self.pixels_per_mm = CALIBRATION_PIXELS_PER_MM_DEFAULT
@@ -203,6 +217,87 @@ class ImageEditor(QMainWindow):
             self._on_project_row_changed
         )
         left_layout.addWidget(self.project_files_list, 1)
+
+        interaction_card = QFrame(left_panel)
+        interaction_card.setObjectName("imageInteractionCard")
+        interaction_layout = QVBoxLayout(interaction_card)
+        interaction_layout.setContentsMargins(12, 12, 12, 12)
+        interaction_layout.setSpacing(10)
+
+        interaction_title = QLabel("Взаимодействие с изображением", interaction_card)
+        interaction_title.setObjectName("panelSubTitle")
+        interaction_title.setWordWrap(True)
+        interaction_layout.addWidget(interaction_title)
+
+        interaction_hint = QLabel(
+            "Управление отображением слоев на изображении.",
+            interaction_card,
+        )
+        interaction_hint.setObjectName("panelHint")
+        interaction_hint.setWordWrap(True)
+        interaction_layout.addWidget(interaction_hint)
+
+        layers_title = QLabel("Отображение", interaction_card)
+        layers_title.setObjectName("panelHint")
+        interaction_layout.addWidget(layers_title)
+
+        toggle_bar = QFrame(interaction_card)
+        toggle_bar.setObjectName("overlayToggleBar")
+        toggle_bar_layout = QHBoxLayout(toggle_bar)
+        toggle_bar_layout.setContentsMargins(6, 6, 6, 6)
+        toggle_bar_layout.setSpacing(6)
+
+        self.show_boxes_button = QPushButton("Боксы", toggle_bar)
+        self.show_boxes_button.setCheckable(True)
+        self.show_boxes_button.setChecked(self._show_boxes)
+        self.show_boxes_button.setProperty("segmented", "true")
+        self.show_boxes_button.toggled.connect(self._set_show_boxes)
+        toggle_bar_layout.addWidget(self.show_boxes_button)
+
+        self.show_masks_button = QPushButton("Маски", toggle_bar)
+        self.show_masks_button.setCheckable(True)
+        self.show_masks_button.setChecked(self._show_masks)
+        self.show_masks_button.setProperty("segmented", "true")
+        self.show_masks_button.toggled.connect(self._set_show_masks)
+        toggle_bar_layout.addWidget(self.show_masks_button)
+
+        interaction_layout.addWidget(toggle_bar)
+
+        mode_title = QLabel("Режим работы", interaction_card)
+        mode_title.setObjectName("panelHint")
+        interaction_layout.addWidget(mode_title)
+
+        mode_bar = QFrame(interaction_card)
+        mode_bar.setObjectName("interactionModeBar")
+        mode_bar_layout = QHBoxLayout(mode_bar)
+        mode_bar_layout.setContentsMargins(6, 6, 6, 6)
+        mode_bar_layout.setSpacing(6)
+
+        self.view_mode_button = QPushButton("Просмотр", mode_bar)
+        self.view_mode_button.setCheckable(True)
+        self.view_mode_button.setChecked(True)
+        self.view_mode_button.setProperty("segmented", "true")
+        self.view_mode_button.toggled.connect(
+            lambda checked: checked and self._set_interaction_mode("view")
+        )
+        mode_bar_layout.addWidget(self.view_mode_button)
+
+        self.edit_boxes_mode_button = QPushButton("Ред. боксов", mode_bar)
+        self.edit_boxes_mode_button.setCheckable(True)
+        self.edit_boxes_mode_button.setProperty("segmented", "true")
+        self.edit_boxes_mode_button.setEnabled(False)
+        self.edit_boxes_mode_button.setToolTip("Режим будет добавлен позже.")
+        mode_bar_layout.addWidget(self.edit_boxes_mode_button)
+
+        self.edit_masks_mode_button = QPushButton("Ред. маски", mode_bar)
+        self.edit_masks_mode_button.setCheckable(True)
+        self.edit_masks_mode_button.setProperty("segmented", "true")
+        self.edit_masks_mode_button.setEnabled(False)
+        self.edit_masks_mode_button.setToolTip("Режим будет добавлен позже.")
+        mode_bar_layout.addWidget(self.edit_masks_mode_button)
+
+        interaction_layout.addWidget(mode_bar)
+        left_layout.addWidget(interaction_card)
         splitter.addWidget(left_panel)
 
         self.canvas_host = QFrame(self)
@@ -743,6 +838,25 @@ class ImageEditor(QMainWindow):
             return
         self._restore_display(preserve_view=True)
 
+    def _set_show_boxes(self, visible: bool) -> None:
+        self._show_boxes = bool(visible)
+        self._refresh_current_view()
+
+    def _set_show_masks(self, visible: bool) -> None:
+        self._show_masks = bool(visible)
+        self._refresh_current_view()
+
+    def _set_interaction_mode(self, mode: str) -> None:
+        if mode not in {"view", "edit_boxes", "edit_masks"}:
+            return
+        self._interaction_mode = mode
+        self._apply_interaction_mode_to_rect_items()
+
+    def _apply_interaction_mode_to_rect_items(self) -> None:
+        editable = self._interaction_mode == "edit_boxes"
+        for item in self.rect_items:
+            item.setEditable(editable)
+
     def _build_toolbar(self) -> None:
         toolbar = QToolBar("Main", self)
         toolbar.setObjectName("mainToolbar")
@@ -1142,8 +1256,8 @@ class ImageEditor(QMainWindow):
                         class_index,
                         confidence=part.confidence,
                     )
-                child.setExpanded(True)
-            root.setExpanded(True)
+                child.setExpanded(False)
+            root.setExpanded(False)
 
         self.tree_widget.blockSignals(False)
 
@@ -1211,6 +1325,7 @@ class ImageEditor(QMainWindow):
     ) -> None:
         self.graphics_scene.clear()
         self.rect_items = []
+        self.mask_items = []
         self._pixmap_item = None
         self._original_pixmap = None
         self._reset_measure_state(clear_items=True)
@@ -1359,6 +1474,36 @@ class ImageEditor(QMainWindow):
         global_bbox = (sx1 + ux1, sy1 + uy1, sx1 + ux2, sy1 + uy2)
         return clip_bbox_to_image(global_bbox, page_width, page_height)
 
+    def _part_mask_colors(self, class_name: str | None) -> tuple[QColor, QColor]:
+        value = (class_name or "").strip().lower()
+        if value == "root":
+            return QColor(52, 199, 89, 80), QColor(52, 199, 89, 210)
+        if value == "stem":
+            return QColor(255, 159, 10, 80), QColor(255, 159, 10, 210)
+        if value in {"flower", "inflorescence"}:
+            return QColor(64, 156, 255, 80), QColor(64, 156, 255, 210)
+        return QColor(46, 226, 201, 70), QColor(46, 226, 201, 190)
+
+    def _add_part_mask_item(self, part_obj: AllClassImage) -> None:
+        polygon = getattr(part_obj, "mask_polygon", None)
+        if polygon is None:
+            return
+
+        points = np.asarray(polygon, dtype=np.float32)
+        if points.ndim != 2 or points.shape[1] != 2 or points.shape[0] < 3:
+            return
+
+        q_polygon = QPolygonF([QPointF(float(x), float(y)) for x, y in points])
+        fill_color, outline_color = self._part_mask_colors(part_obj.class_name)
+        item = self.graphics_scene.addPolygon(
+            q_polygon,
+            QPen(outline_color, 2),
+            QBrush(fill_color),
+        )
+        item.setAcceptedMouseButtons(Qt.NoButton)
+        item.setZValue(0.5)
+        self.mask_items.append(item)
+
     def display_image_with_boxes(
         self,
         img_idx: int,
@@ -1414,7 +1559,7 @@ class ImageEditor(QMainWindow):
         if seeding_idx is None:
             page_height, page_width = base_img.shape[:2]
             for seed_obj in objects_to_draw:
-                if seed_obj.bbox:
+                if self._show_boxes and seed_obj.bbox:
                     x1, y1, x2, y2 = seed_obj.bbox
                     rect = QRectF(x1, y1, x2 - x1, y2 - y1)
                     item = BBoxItem(
@@ -1423,31 +1568,36 @@ class ImageEditor(QMainWindow):
                         class_label="Сеянец",
                         pixels_per_mm=self.pixels_per_mm,
                     )
+                    item.setZValue(1.0)
                     self.graphics_scene.addItem(item)
                     self.rect_items.append(item)
 
-                for part_obj in seed_obj.image_all_class or []:
-                    global_bbox = self._part_bbox_to_global(
-                        page_width,
-                        page_height,
-                        seed_obj,
-                        part_obj,
-                    )
-                    if global_bbox is None:
-                        continue
-                    px1, py1, px2, py2 = global_bbox
-                    rect = QRectF(px1, py1, px2 - px1, py2 - py1)
-                    item = BBoxItem(
-                        rect,
-                        part_obj,
-                        class_label=self._display_part_name(part_obj.class_name),
-                        pixels_per_mm=self.pixels_per_mm,
-                    )
-                    self.graphics_scene.addItem(item)
-                    self.rect_items.append(item)
+                if self._show_boxes:
+                    for part_obj in seed_obj.image_all_class or []:
+                        global_bbox = self._part_bbox_to_global(
+                            page_width,
+                            page_height,
+                            seed_obj,
+                            part_obj,
+                        )
+                        if global_bbox is None:
+                            continue
+                        px1, py1, px2, py2 = global_bbox
+                        rect = QRectF(px1, py1, px2 - px1, py2 - py1)
+                        item = BBoxItem(
+                            rect,
+                            part_obj,
+                            class_label=self._display_part_name(part_obj.class_name),
+                            pixels_per_mm=self.pixels_per_mm,
+                        )
+                        item.setZValue(1.0)
+                        self.graphics_scene.addItem(item)
+                        self.rect_items.append(item)
         else:
             for part_obj in objects_to_draw:
-                if not part_obj.bbox:
+                if self._show_masks:
+                    self._add_part_mask_item(part_obj)
+                if not self._show_boxes or not part_obj.bbox:
                     continue
                 x1, y1, x2, y2 = part_obj.bbox
                 rect = QRectF(x1, y1, x2 - x1, y2 - y1)
@@ -1457,9 +1607,11 @@ class ImageEditor(QMainWindow):
                     class_label=self._display_part_name(part_obj.class_name),
                     pixels_per_mm=self.pixels_per_mm,
                 )
+                item.setZValue(1.0)
                 self.graphics_scene.addItem(item)
                 self.rect_items.append(item)
 
+        self._apply_interaction_mode_to_rect_items()
         self.thumbnails_panel.set_active_index(img_idx)
         self._update_canvas_status()
 

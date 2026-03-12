@@ -36,6 +36,7 @@ class InferenceBox:
     cls: int
     conf: float
     bbox_xyxy: tuple[float, float, float, float]
+    mask_polygon: np.ndarray | None = None
 
     @property
     def xyxy(self) -> list[_TensorAdapter]:
@@ -99,6 +100,25 @@ def _normalize_names_map(names: Any) -> dict[int, str]:
     return {}
 
 
+def _normalize_mask_polygon(polygon: Any) -> np.ndarray | None:
+    if polygon is None:
+        return None
+    normalized = np.asarray(polygon, dtype=np.float32)
+    if normalized.ndim != 2 or normalized.shape[1] != 2 or normalized.shape[0] < 3:
+        return None
+    return np.ascontiguousarray(normalized)
+
+
+def _extract_mask_polygons(result: Any) -> list[np.ndarray | None]:
+    masks = getattr(result, "masks", None)
+    if masks is None:
+        return []
+    polygons = getattr(masks, "xy", None)
+    if polygons is None:
+        return []
+    return [_normalize_mask_polygon(polygon) for polygon in polygons]
+
+
 def normalize_yolo_results(raw_results) -> list[InferenceResult]:
     if raw_results is None:
         return []
@@ -106,14 +126,18 @@ def normalize_yolo_results(raw_results) -> list[InferenceResult]:
     normalized_results: list[InferenceResult] = []
     for result in raw_results:
         names = _normalize_names_map(getattr(result, "names", {}))
+        mask_polygons = _extract_mask_polygons(result)
         boxes: list[InferenceBox] = []
-        for box in getattr(result, "boxes", []) or []:
+        for index, box in enumerate(getattr(result, "boxes", []) or []):
             coords = box.xyxy[0].cpu().numpy()
             boxes.append(
                 InferenceBox(
                     cls=int(box.cls),
                     conf=float(box.conf),
                     bbox_xyxy=tuple(float(value) for value in coords[:4]),
+                    mask_polygon=(
+                        mask_polygons[index] if index < len(mask_polygons) else None
+                    ),
                 )
             )
         normalized_results.append(InferenceResult(names=names, boxes=boxes))

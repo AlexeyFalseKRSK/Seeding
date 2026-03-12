@@ -7,7 +7,7 @@ from PyQt5.QtWidgets import QApplication
 
 from seeding.config import QSETTINGS_APP, QSETTINGS_ORG
 from seeding.inference import InferenceBox, InferenceResult
-from seeding.models import ObjectImage
+from seeding.models import AllClassImage, ObjectImage
 from seeding.ui.main_window import ImageEditor
 
 
@@ -81,6 +81,7 @@ def test_find_seedlings_updates_tree_and_statistics():
 
     assert len(window.image_storage.class_object_image[0]) == 1
     assert window.tree_widget.topLevelItemCount() == 1
+    assert not window.tree_widget.topLevelItem(0).isExpanded()
     assert window.statistics_panel._summary.objects_count == 1
 
     window.close()
@@ -114,6 +115,10 @@ def test_classify_adds_parts_to_detected_object():
                         cls=0,
                         conf=0.7,
                         bbox_xyxy=(1.0, 2.0, 8.0, 12.0),
+                        mask_polygon=np.array(
+                            [[1.0, 2.0], [8.0, 2.0], [8.0, 12.0], [1.0, 12.0]],
+                            dtype=np.float32,
+                        ),
                     )
                 ],
             )
@@ -126,6 +131,63 @@ def test_classify_adds_parts_to_detected_object():
     assert parts is not None
     assert len(parts) == 1
     assert parts[0].class_name == "root"
+    assert parts[0].mask_polygon is not None
+    assert parts[0].mask_polygon.shape == (4, 2)
+
+    window.close()
+    if created:
+        app.quit()
+
+
+def test_crop_view_renders_part_mask_overlay():
+    app, created = _ensure_offscreen_qt()
+    crop = np.zeros((20, 12, 3), dtype=np.uint8)
+    window = ImageEditor("dummy_weights.pt", "dummy_classify.pt")
+    window.image_storage.images = [np.zeros((40, 40, 3), dtype=np.uint8)]
+    window.image_storage.source_files = ["page1.png"]
+    window.image_storage.file_path = "page1.png"
+    window.image_storage.class_object_image = [
+        [
+            ObjectImage(
+                class_name="seeding",
+                confidence=0.9,
+                image=[crop],
+                bbox=(10, 10, 22, 30),
+                image_all_class=[
+                    AllClassImage(
+                        class_name="root",
+                        confidence=0.75,
+                        image=np.zeros((10, 7, 3), dtype=np.uint8),
+                        bbox=(1, 2, 8, 12),
+                        mask_polygon=np.array(
+                            [[1.0, 2.0], [8.0, 2.0], [8.0, 12.0], [1.0, 12.0]],
+                            dtype=np.float32,
+                        ),
+                    )
+                ],
+            )
+        ]
+    ]
+
+    window.display_image_with_boxes(0, seeding_idx=0)
+
+    assert window.show_boxes_button.isChecked()
+    assert window.show_masks_button.isChecked()
+    assert window.view_mode_button.isChecked()
+    assert not window.edit_boxes_mode_button.isEnabled()
+    assert not window.edit_masks_mode_button.isEnabled()
+    assert len(window.mask_items) == 1
+    assert len(window.rect_items) == 1
+    assert not (
+        window.rect_items[0].flags() & QGraphicsItem.ItemIsMovable
+    )
+
+    window.show_masks_button.setChecked(False)
+    assert len(window.mask_items) == 0
+    assert len(window.rect_items) == 1
+
+    window.show_boxes_button.setChecked(False)
+    assert len(window.rect_items) == 0
 
     window.close()
     if created:

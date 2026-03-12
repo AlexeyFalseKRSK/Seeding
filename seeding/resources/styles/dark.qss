@@ -444,6 +444,11 @@ QPushButton[segmented="true"]:hover:!checked {
     background: #182635;
 }
 
+QPushButton[segmented="true"]:disabled {
+    color: #5d7387;
+    background: transparent;
+}
+
 QLabel#modeBadge {
     background: #9de0c9;
     border: 1px solid #7dc2aa;
@@ -496,6 +501,24 @@ QFrame#panelCard {
     background: rgba(16, 23, 33, 0.95);
     border: 1px solid #1f3345;
     border-radius: 14px;
+}
+
+QFrame#imageInteractionCard {
+    background: rgba(11, 19, 29, 0.96);
+    border: 1px solid #1f3345;
+    border-radius: 12px;
+}
+
+QFrame#overlayToggleBar {
+    background: #101926;
+    border: 1px solid #2b4158;
+    border-radius: 12px;
+}
+
+QFrame#interactionModeBar {
+    background: #101926;
+    border: 1px solid #2b4158;
+    border-radius: 12px;
 }
 
 QScrollArea#rightSidebarScroll {

@@ -12,6 +12,7 @@ from seeding.utils import (
     clip_bbox_to_image,
     rotate_bbox,
     rotate_image_and_boxes,
+    rotate_polygon_points,
     simple_nms,
 )
 
@@ -125,6 +126,7 @@ class ImageService:
             raise ValueError("Изображение кропа пустое")
 
         crop = obj.image[0]
+        crop_height, crop_width = crop.shape[:2]
         class_map: list[int] = []
         class_boxes: list[tuple[int, int, int, int]] = []
         if obj.image_all_class:
@@ -143,6 +145,16 @@ class ImageService:
 
         for mapped_idx, class_idx in enumerate(class_map):
             obj.image_all_class[class_idx].bbox = rotated_class_boxes[mapped_idx]
+        if obj.image_all_class:
+            for cls_obj in obj.image_all_class:
+                if cls_obj.mask_polygon is None:
+                    continue
+                cls_obj.mask_polygon = rotate_polygon_points(
+                    cls_obj.mask_polygon,
+                    crop_width,
+                    crop_height,
+                    angle,
+                )
         return rotated_crop
 
     @staticmethod
@@ -315,6 +327,22 @@ class DetectionService:
 
 class ClassificationService:
     @staticmethod
+    def _clip_mask_polygon(
+        mask_polygon: np.ndarray | None,
+        width: int,
+        height: int,
+    ) -> np.ndarray | None:
+        if mask_polygon is None or width <= 0 or height <= 0:
+            return None
+        polygon = np.asarray(mask_polygon, dtype=np.float32)
+        if polygon.ndim != 2 or polygon.shape[1] != 2 or polygon.shape[0] < 3:
+            return None
+        clipped = polygon.copy()
+        clipped[:, 0] = np.clip(clipped[:, 0], 0.0, float(width - 1))
+        clipped[:, 1] = np.clip(clipped[:, 1], 0.0, float(height - 1))
+        return np.ascontiguousarray(clipped)
+
+    @staticmethod
     def build_parts(crop_image: np.ndarray, results) -> list[AllClassImage]:
         if crop_image is None or results is None or not results:
             return []
@@ -342,12 +370,18 @@ class ClassificationService:
 
                 lx1, ly1, lx2, ly2 = local_bbox
                 part_image = crop_image[ly1:ly2, lx1:lx2].copy()
+                mask_polygon = ClassificationService._clip_mask_polygon(
+                    getattr(box, "mask_polygon", None),
+                    crop_width,
+                    crop_height,
+                )
                 parts.append(
                     AllClassImage(
                         class_name=class_name,
                         confidence=confidence,
                         image=part_image,
                         bbox=local_bbox,
+                        mask_polygon=mask_polygon,
                     )
                 )
         return parts

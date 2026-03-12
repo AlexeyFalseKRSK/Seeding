@@ -17,6 +17,7 @@ class AllClassImage:
     confidence: float
     image: np.ndarray | Image.Image
     bbox: BBox | None = None
+    mask_polygon: np.ndarray | None = None
 
 
 @dataclass

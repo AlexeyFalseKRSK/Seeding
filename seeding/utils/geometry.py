@@ -86,6 +86,68 @@ def rotate_bbox(x1, y1, x2, y2, w, h, k):
     return int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))
 
 
+def rotate_polygon_points(
+    points: np.ndarray,
+    width: int,
+    height: int,
+    angle: float,
+) -> np.ndarray | None:
+    """Rotates polygon points with the same transform as image rotation."""
+    if points is None or width <= 0 or height <= 0:
+        return None
+
+    polygon = np.asarray(points, dtype=np.float64)
+    if polygon.ndim != 2 or polygon.shape[1] != 2 or polygon.shape[0] < 3:
+        return None
+
+    quarter_turns = int(round(angle / 90.0))
+    if np.isclose(angle, quarter_turns * 90.0):
+        k_mod = quarter_turns % 4
+        if k_mod == 1:
+            transformed = np.column_stack((polygon[:, 1], width - 1 - polygon[:, 0]))
+            target_width, target_height = height, width
+        elif k_mod == 2:
+            transformed = np.column_stack(
+                (width - 1 - polygon[:, 0], height - 1 - polygon[:, 1])
+            )
+            target_width, target_height = width, height
+        elif k_mod == 3:
+            transformed = np.column_stack((height - 1 - polygon[:, 1], polygon[:, 0]))
+            target_width, target_height = height, width
+        else:
+            transformed = polygon.copy()
+            target_width, target_height = width, height
+    else:
+        center = (width / 2.0, height / 2.0)
+        matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+
+        abs_cos = abs(matrix[0, 0])
+        abs_sin = abs(matrix[0, 1])
+        target_width = int(height * abs_sin + width * abs_cos)
+        target_height = int(height * abs_cos + width * abs_sin)
+
+        matrix[0, 2] += (target_width / 2.0) - center[0]
+        matrix[1, 2] += (target_height / 2.0) - center[1]
+
+        homogeneous = np.concatenate(
+            (polygon, np.ones((polygon.shape[0], 1), dtype=np.float64)),
+            axis=1,
+        )
+        transformed = homogeneous @ matrix.T
+
+    transformed[:, 0] = np.clip(
+        transformed[:, 0],
+        0.0,
+        max(float(target_width - 1), 0.0),
+    )
+    transformed[:, 1] = np.clip(
+        transformed[:, 1],
+        0.0,
+        max(float(target_height - 1), 0.0),
+    )
+    return np.ascontiguousarray(transformed.astype(np.float32))
+
+
 def clip_bbox_to_image(
     bbox: tuple[int, int, int, int],
     width: int,
