@@ -73,9 +73,14 @@ from seeding.config import (
     WINDOW_Y,
     ZOOM_FACTOR_INCREMENT,
 )
-from seeding.controllers import AppController
 from seeding.inference import InferenceBackend, load_inference_backend
 from seeding.models import AllClassImage, AppState, ObjectImage, OriginalImage
+from seeding.services import (
+    generate_report,
+    rotate_current,
+    run_classification_for_selection,
+    run_detection,
+)
 from seeding.ui.bbox_item import BBoxItem
 from seeding.ui.icon_manager import IconManager
 from seeding.ui.statistics_panel import StatisticsPanel
@@ -152,7 +157,6 @@ class ImageEditor(QMainWindow):
         )
         self.detect_model: InferenceBackend | None = None
         self.classify_model: InferenceBackend | None = None
-        self.app_controller = AppController()
         self.app_state = AppState(image_storage=OriginalImage())
         self.image_storage = self.app_state.image_storage
         self._active_image_index = 0
@@ -1036,15 +1040,6 @@ class ImageEditor(QMainWindow):
         """Показывает модальное информационное сообщение."""
         QMessageBox.information(self, title, text)
 
-    def _ensure_detection_storage(self) -> None:
-        """Гарантирует наличие списка детекций для всех загруженных страниц."""
-        if self.image_storage.class_object_image is None:
-            self.image_storage.class_object_image = []
-        while len(self.image_storage.class_object_image) < len(
-            self.image_storage.images
-        ):
-            self.image_storage.class_object_image.append([])
-
     def _ensure_detect_model(self) -> InferenceBackend | None:
         """Лениво загружает модель детекции и возвращает её экземпляр."""
         if self.detect_model is not None:
@@ -1222,7 +1217,12 @@ class ImageEditor(QMainWindow):
         self.image_storage.source_files.append(source_path)
         if not self.image_storage.file_path:
             self.image_storage.file_path = source_path
-        self._ensure_detection_storage()
+        if self.image_storage.class_object_image is None:
+            self.image_storage.class_object_image = []
+        while len(self.image_storage.class_object_image) < len(
+            self.image_storage.images
+        ):
+            self.image_storage.class_object_image.append([])
 
         item = QListWidgetItem(self._page_title(index))
         item.setData(Qt.UserRole, index)
@@ -1738,13 +1738,12 @@ class ImageEditor(QMainWindow):
         if model is None:
             return
 
-        self._ensure_detection_storage()
         image = self.image_storage.images[self._active_image_index]
         results = model.predict(
             image,
             conf_threshold=DETECTION_CONFIDENCE_THRESHOLD,
         )
-        objects = self.app_controller.run_detection(
+        objects = run_detection(
             self.app_state,
             self._active_image_index,
             results,
@@ -1766,7 +1765,6 @@ class ImageEditor(QMainWindow):
         if model is None:
             return
 
-        self._ensure_detection_storage()
         total = len(self.image_storage.images)
         progress = QProgressDialog(
             "Детекция на всех страницах...",
@@ -1786,7 +1784,7 @@ class ImageEditor(QMainWindow):
                 image,
                 conf_threshold=DETECTION_CONFIDENCE_THRESHOLD,
             )
-            self.app_controller.run_detection(
+            run_detection(
                 self.app_state,
                 page_index,
                 results,
@@ -1847,7 +1845,7 @@ class ImageEditor(QMainWindow):
                 if not obj.image:
                     continue
                 results = model.predict(obj.image[0])
-                self.app_controller.run_classification_for_selection(
+                run_classification_for_selection(
                     self.app_state,
                     page_index,
                     object_index,
@@ -1877,7 +1875,7 @@ class ImageEditor(QMainWindow):
                 "index": int(selection["seeding_index"]),
             }
 
-        result = self.app_controller.rotate_current(
+        result = rotate_current(
             self.app_state,
             selection,
             angle=ROTATE_ANGLE_DEG,
@@ -1925,10 +1923,11 @@ class ImageEditor(QMainWindow):
             output_path += ".pdf"
 
         try:
-            saved_path = self.app_controller.generate_report(
+            saved_path = generate_report(
                 self.app_state,
                 output_path,
             )
+            self.app_state.last_report_path = saved_path
             self._show_info("Отчёт создан", f"Отчёт сохранён:\n{saved_path}")
         except Exception as error:
             logger.exception("Ошибка создания отчёта")

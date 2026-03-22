@@ -220,9 +220,8 @@ def test_create_report_updates_last_report_path(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(window, "_show_info", lambda *args, **kwargs: None)
     monkeypatch.setattr(
-        window.app_controller.report_service,
-        "generate_report",
-        lambda data, path: path,
+        "seeding.ui.main_window.generate_report",
+        lambda state, path: path,
     )
 
     window.create_report()
