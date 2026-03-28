@@ -27,7 +27,8 @@ def _iter_page_objects(
 ) -> list[ObjectImage]:
     """Возвращает объекты указанной страницы или пустой список при их отсутствии."""
     if (
-        not image_storage.class_object_image
+        page_index < 0
+        or not image_storage.class_object_image
         or page_index >= len(image_storage.class_object_image)
     ):
         return []
@@ -175,6 +176,8 @@ def rotate_selection(
     item_type = item_data.get("type")
     if item_type in ("original", "pdf"):
         page_index = int(item_data["index"])
+        if page_index < 0 or page_index >= len(state.image_storage.images):
+            return None
         rotated = rotate_page(
             state.image_storage,
             page_index,
@@ -191,6 +194,11 @@ def rotate_selection(
     if item_type == "seeding":
         page_index = int(item_data["parent_index"])
         crop_index = int(item_data["index"])
+        if page_index < 0 or page_index >= len(state.image_storage.images):
+            return None
+        page_objects = _iter_page_objects(state.image_storage, page_index)
+        if crop_index < 0 or crop_index >= len(page_objects):
+            return None
         rotated = rotate_crop(
             state.image_storage,
             page_index,
@@ -229,7 +237,7 @@ def build_detected_objects(
     image: np.ndarray,
     results,
     *,
-    detection_class_name: str,
+    detection_class_names: tuple[str, ...] | list[str] | set[str] | None,
     iou_threshold: float,
     rotate_k: int,
 ) -> list[ObjectImage]:
@@ -238,14 +246,17 @@ def build_detected_objects(
         return []
 
     parsed: list[dict] = []
-    boxes: list[list[int]] = []
-    scores: list[float] = []
+    allowed_class_names = (
+        {str(value).lower() for value in detection_class_names}
+        if detection_class_names
+        else None
+    )
     height, width = image.shape[:2]
 
     for box in results[0].boxes:
         class_id = int(box.cls)
         class_name = str(results[0].names[class_id]).lower()
-        if class_name != detection_class_name.lower():
+        if allowed_class_names is not None and class_name not in allowed_class_names:
             continue
 
         score = float(box.conf)
@@ -267,13 +278,21 @@ def build_detected_objects(
                 "bbox": (cx1, cy1, cx2, cy2),
             }
         )
-        boxes.append([cx1, cy1, cx2, cy2])
-        scores.append(score)
 
-    if not boxes:
+    if not parsed:
         return []
 
-    kept_indices = simple_nms(boxes, scores, iou_threshold=iou_threshold)
+    kept_indices: list[int] = []
+    indices_by_class: dict[str, list[int]] = {}
+    for idx, item in enumerate(parsed):
+        indices_by_class.setdefault(str(item["class_name"]), []).append(idx)
+    for class_indices in indices_by_class.values():
+        boxes = [list(parsed[idx]["bbox"]) for idx in class_indices]
+        scores = [float(parsed[idx]["score"]) for idx in class_indices]
+        kept_local = simple_nms(boxes, scores, iou_threshold=iou_threshold)
+        kept_indices.extend(class_indices[idx] for idx in kept_local)
+    kept_indices.sort(key=lambda idx: float(parsed[idx]["score"]), reverse=True)
+
     objects: list[ObjectImage] = []
     for idx in kept_indices:
         item = parsed[idx]
@@ -302,7 +321,7 @@ def run_detection(
     page_index: int,
     results,
     *,
-    detection_class_name: str,
+    detection_class_names: tuple[str, ...] | list[str] | set[str] | None,
     iou_threshold: float,
     rotate_k: int,
 ) -> list[ObjectImage]:
@@ -311,7 +330,7 @@ def run_detection(
     objects = build_detected_objects(
         image,
         results,
-        detection_class_name=detection_class_name,
+        detection_class_names=detection_class_names,
         iou_threshold=iou_threshold,
         rotate_k=rotate_k,
     )

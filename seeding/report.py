@@ -24,6 +24,7 @@ from reportlab.platypus import (
 )
 
 from seeding.config import (
+    CLASS_DISPLAY_NAMES,
     PDF_BBOX_COLOR_CLASS,
     PDF_BBOX_COLOR_MAIN,
     PDF_BBOX_THICKNESS,
@@ -39,6 +40,12 @@ from seeding.config import (
 )
 from seeding.models import ObjectImage, OriginalImage
 from seeding.utils import rotate_bbox
+
+
+def _display_class_name(class_name: str | None) -> str:
+    """Преобразует внутреннее имя класса в читаемое название для отчёта."""
+    value = (class_name or "").strip().lower()
+    return CLASS_DISPLAY_NAMES.get(value, class_name or "")
 
 
 def _np_to_pil(img: np.ndarray) -> Image.Image:
@@ -189,7 +196,7 @@ def create_pdf_report(data: OriginalImage, output_path: str) -> None:
             table_data.append(
                 [
                     str(i),
-                    obj.class_name,
+                    _display_class_name(obj.class_name),
                     f"{obj.confidence:.2f}",
                     str(bbox),
                 ]

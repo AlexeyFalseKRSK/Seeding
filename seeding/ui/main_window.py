@@ -55,7 +55,8 @@ from PyQt5.QtWidgets import (
 
 from seeding.config import (
     CALIBRATION_PIXELS_PER_MM_DEFAULT,
-    DETECTION_CLASS_NAME,
+    CLASS_DISPLAY_NAMES,
+    DETECTION_CLASS_NAMES,
     DETECTION_CONFIDENCE_THRESHOLD,
     DETECTION_IOU_THRESHOLD,
     DEFAULT_CLASSIFY_WEIGHTS_PATH,
@@ -74,7 +75,13 @@ from seeding.config import (
     ZOOM_FACTOR_INCREMENT,
 )
 from seeding.inference import InferenceBackend, load_inference_backend
-from seeding.models import AllClassImage, AppState, ObjectImage, OriginalImage
+from seeding.models import (
+    AllClassImage,
+    AppState,
+    ObjectImage,
+    OriginalImage,
+    SelectionPayload,
+)
 from seeding.services import (
     generate_report,
     rotate_current,
@@ -418,7 +425,7 @@ class ImageEditor(QMainWindow):
         layout.addWidget(title)
 
         hint = QLabel(
-            "После загрузки можно найти сеянцы, классифицировать части и "
+            "После загрузки можно найти растения, классифицировать части и "
             "сохранить PDF-отчет.",
             empty_state,
         )
@@ -1060,9 +1067,7 @@ class ImageEditor(QMainWindow):
         if self.classify_model is not None:
             return self.classify_model
         try:
-            self.classify_model = load_inference_backend(
-                self.classify_weights_path
-            )
+            self.classify_model = load_inference_backend(self.classify_weights_path)
             return self.classify_model
         except Exception as error:
             logger.exception("Не удалось загрузить модель классификации")
@@ -1572,6 +1577,19 @@ class ImageEditor(QMainWindow):
         item.setZValue(0.5)
         self.mask_items.append(item)
 
+    def _selection_payload_for_display(
+        self,
+        img_idx: int,
+        seeding_idx: int | None = None,
+    ) -> SelectionPayload:
+        """Builds the action selection payload for the currently displayed item."""
+        if seeding_idx is not None:
+            return {"type": "seeding", "parent_index": img_idx, "index": seeding_idx}
+
+        source_path = self._source_file(img_idx)
+        item_type = "pdf" if source_path.lower().endswith(".pdf") else "original"
+        return {"type": item_type, "index": img_idx}
+
     def display_image_with_boxes(
         self,
         img_idx: int,
@@ -1585,9 +1603,6 @@ class ImageEditor(QMainWindow):
 
         self._active_image_index = img_idx
         self.app_state.active_image_index = img_idx
-        self._display_target = (
-            ("page", img_idx) if seeding_idx is None else ("crop", img_idx, seeding_idx)
-        )
 
         if seeding_idx is None:
             base_img = self.image_storage.images[img_idx]
@@ -1607,6 +1622,14 @@ class ImageEditor(QMainWindow):
                 return
             base_img = obj.image[0]
             objects_to_draw = obj.image_all_class or []
+
+        self._display_target = (
+            ("page", img_idx) if seeding_idx is None else ("crop", img_idx, seeding_idx)
+        )
+        self.app_state.selected_item = self._selection_payload_for_display(
+            img_idx,
+            seeding_idx,
+        )
 
         previous_zoom = None
         previous_center = None
@@ -1634,7 +1657,7 @@ class ImageEditor(QMainWindow):
                     item = BBoxItem(
                         rect,
                         seed_obj,
-                        class_label="Сеянец",
+                        class_label=self._display_part_name(seed_obj.class_name),
                         pixels_per_mm=self.pixels_per_mm,
                     )
                     item.setZValue(1.0)
@@ -1686,8 +1709,7 @@ class ImageEditor(QMainWindow):
 
     def _seedling_title(self, object_index: int, obj: ObjectImage) -> str:
         """Возвращает заголовок узла сеянца для дерева слоёв."""
-        _ = obj
-        return f"Сеянец {object_index + 1}"
+        return f"{self._display_part_name(obj.class_name)} {object_index + 1}"
 
     def _object_description(self, obj: ObjectImage) -> str:
         """Формирует краткое описание объекта с уверенностью и bbox."""
@@ -1702,15 +1724,7 @@ class ImageEditor(QMainWindow):
     def _display_part_name(self, class_name: str | None) -> str:
         """Преобразует внутреннее имя класса в человекочитаемое название."""
         value = (class_name or "").strip().lower()
-        mapping = {
-            "root": "Корень",
-            "stem": "Стебель",
-            "flower": "Соцветие",
-            "inflorescence": "Соцветие",
-            "seeding": "Сеянец",
-            "seedling": "Сеянец",
-        }
-        return mapping.get(value, class_name or "Часть")
+        return CLASS_DISPLAY_NAMES.get(value, class_name or "Часть")
 
     def _restore_display(self, *, preserve_view: bool = False) -> None:
         """Восстанавливает ранее выбранный режим показа страницы или кропа."""
@@ -1747,14 +1761,14 @@ class ImageEditor(QMainWindow):
             self.app_state,
             self._active_image_index,
             results,
-            detection_class_name=DETECTION_CLASS_NAME,
+            detection_class_names=DETECTION_CLASS_NAMES,
             iou_threshold=DETECTION_IOU_THRESHOLD,
             rotate_k=ROTATE_K,
         )
         self._refresh_tree()
         self._refresh_statistics_panel()
         self._restore_display(preserve_view=True)
-        self.statusBar().showMessage(f"Найдено объектов: {len(objects)}", 3000)
+        self.statusBar().showMessage(f"Найдено растений: {len(objects)}", 3000)
 
     def find_all_seedlings(self) -> None:
         """Выполняет детекцию сеянцев на всех страницах текущего проекта."""
@@ -1767,7 +1781,7 @@ class ImageEditor(QMainWindow):
 
         total = len(self.image_storage.images)
         progress = QProgressDialog(
-            "Детекция на всех страницах...",
+            "Детекция растений на всех страницах...",
             "Отмена",
             0,
             total,
@@ -1788,7 +1802,7 @@ class ImageEditor(QMainWindow):
                 self.app_state,
                 page_index,
                 results,
-                detection_class_name=DETECTION_CLASS_NAME,
+                detection_class_names=DETECTION_CLASS_NAMES,
                 iou_threshold=DETECTION_IOU_THRESHOLD,
                 rotate_k=ROTATE_K,
             )
@@ -1800,7 +1814,7 @@ class ImageEditor(QMainWindow):
         self._refresh_statistics_panel()
         self._restore_display(preserve_view=True)
         self.statusBar().showMessage(
-            f"Пакетная детекция завершена: {processed}/{total}",
+            f"Пакетная детекция растений завершена: {processed}/{total}",
             3000,
         )
 
@@ -1811,7 +1825,7 @@ class ImageEditor(QMainWindow):
         ):
             self._show_info(
                 "Нет детекций",
-                "Сначала выполните детекцию сеянцев.",
+                "Сначала выполните детекцию растений.",
             )
             return
         model = self._ensure_classify_model()

@@ -1,0 +1,6 @@
+path: E:/_JOB_/_Python/Seeding/dataset/datasetV1_species
+train: train/images
+val: valid/images
+test: test/images
+nc: 2
+names: ['cedr', 'pinus']

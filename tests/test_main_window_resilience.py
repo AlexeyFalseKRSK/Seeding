@@ -65,6 +65,38 @@ def test_append_page_keeps_storage_lists_in_sync():
         app.quit()
 
 
+def test_rotate_image_uses_current_display_after_stale_crop_selection():
+    """Rotation should follow the displayed page instead of a stale crop."""
+    app, created = _ensure_offscreen_qt()
+    window = ImageEditor("dummy_weights.pt", "dummy_classify.pt")
+    window._append_page(np.zeros((30, 10, 3), dtype=np.uint8), "first.pdf")
+    window._append_page(np.zeros((12, 24, 3), dtype=np.uint8), "second.pdf")
+    window.image_storage.class_object_image[0] = [
+        ObjectImage(
+            class_name="seeding",
+            confidence=0.9,
+            image=[np.zeros((8, 8, 3), dtype=np.uint8)],
+            bbox=(1, 1, 9, 9),
+        )
+    ]
+    window.image_storage.class_object_image[1] = []
+    window.app_state.selected_item = {
+        "type": "seeding",
+        "parent_index": 0,
+        "index": 0,
+    }
+
+    window.display_image_with_boxes(1)
+    window.rotate_image()
+
+    assert window.app_state.selected_item == {"type": "pdf", "index": 1}
+    assert window.image_storage.images[1].shape == (24, 12, 3)
+
+    window.close()
+    if created:
+        app.quit()
+
+
 def test_find_seedlings_updates_tree_and_statistics():
     """Проверяет обновление дерева и статистики после детекции на странице."""
     app, created = _ensure_offscreen_qt()

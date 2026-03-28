@@ -175,7 +175,7 @@ class StatisticsPanel(QWidget):
         self.avg_conf_label.setText(
             f"Средняя уверенность: {summary.avg_confidence:.3f}"
         )
-        self.seedlings_label.setText(f"Сеянцев: {summary.seedlings_count}")
+        self.seedlings_label.setText(f"Растений: {summary.seedlings_count}")
         self.inflorescences_label.setText(
             f"Соцветий: {summary.inflorescences_count}"
         )

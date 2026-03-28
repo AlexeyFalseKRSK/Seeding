@@ -13,7 +13,7 @@ QSETTINGS_APP = "Detector"
 DEFAULT_WEIGHTS_PATH = Path(
     os.getenv(
         "YOLO_WEIGHTS_PATH",
-        str(PROJECT_ROOT / "models" / "bestCrop.pt"),
+        str(PROJECT_ROOT / "models" / "bestDetectNew.pt"),
     )
 )
 DEFAULT_CLASSIFY_WEIGHTS_PATH = Path(
@@ -23,7 +23,17 @@ DEFAULT_CLASSIFY_WEIGHTS_PATH = Path(
     )
 )
 
-DETECTION_CLASS_NAME = "seeding"
+DETECTION_CLASS_NAMES = ("seeding", "seedling", "cedr", "pinus")
+CLASS_DISPLAY_NAMES = {
+    "cedr": "Кедр",
+    "pinus": "Сосна",
+    "root": "Корень",
+    "stem": "Стебель",
+    "flower": "Соцветие",
+    "inflorescence": "Соцветие",
+    "seeding": "Сеянец",
+    "seedling": "Сеянец",
+}
 NMS_IOU_THRESHOLD = 0.4
 DETECTION_CONFIDENCE_THRESHOLD = 0.25
 DETECTION_IOU_THRESHOLD = NMS_IOU_THRESHOLD
