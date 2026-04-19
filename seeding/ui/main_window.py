@@ -12,7 +12,16 @@ from typing import Any
 import cv2
 import fitz
 import numpy as np
-from PyQt5.QtCore import QEvent, QPoint, QPointF, QRectF, QSettings, QSize, Qt
+from PyQt5.QtCore import (
+    QEvent,
+    QPoint,
+    QPointF,
+    QRectF,
+    QSettings,
+    QSize,
+    Qt,
+    pyqtSignal,
+)
 from PyQt5.QtGui import (
     QBrush,
     QColor,
@@ -44,6 +53,7 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QProgressDialog,
     QShortcut,
+    QSizePolicy,
     QSplitter,
     QStackedLayout,
     QStyle,
@@ -151,6 +161,8 @@ class CanvasGraphicsView(QGraphicsView):
 class ImageEditor(QMainWindow):
     """Главное окно приложения с загрузкой файлов, анализом и просмотром результатов."""
 
+    logout_requested = pyqtSignal()
+
     def __init__(
         self,
         weights_path: str,
@@ -183,17 +195,27 @@ class ImageEditor(QMainWindow):
         self._measure_start_scene_pos: QPointF | None = None
         self._measure_line_item: QGraphicsLineItem | None = None
         self._measure_text_item: QGraphicsTextItem | None = None
+        self._resize_active = False
+        self._resize_edges = Qt.Edges()
+        self._resize_start_geometry = QRectF()
+        self._resize_start_global_pos = QPoint()
+        self._resize_margin = 8
+        self._window_drag_active = False
+        self._window_drag_offset = QPoint()
         self._settings = QSettings(QSETTINGS_ORG, QSETTINGS_APP)
         self.app_state.zoom_factor = self.zoom_factor
         self.app_state.pixels_per_mm = self.pixels_per_mm
 
         self.setWindowTitle("Seeding")
+        self.setWindowFlag(Qt.FramelessWindowHint, True)
         self.setGeometry(WINDOW_X, WINDOW_Y, WINDOW_WIDTH, WINDOW_HEIGHT)
 
         self.icon_manager = IconManager(self)
         self._build_ui()
         self._build_toolbar()
         self._build_menu()
+        self._install_frameless_event_filters()
+        self._update_window_control_buttons()
         QShortcut(QKeySequence("M"), self, self.toggle_measure_mode)
         self.statusBar().showMessage("Откройте изображение или PDF", 3000)
 
@@ -815,6 +837,9 @@ class ImageEditor(QMainWindow):
 
     def eventFilter(self, watched, event):
         """Обрабатывает колесо мыши и события линейки в области просмотра изображения."""
+        if self._handle_frameless_window_event(watched, event):
+            return True
+
         if watched is self.graphics_view.viewport():
             if event.type() == QEvent.Wheel and event.modifiers() & Qt.ControlModifier:
                 if event.angleDelta().y() > 0:
@@ -874,6 +899,13 @@ class ImageEditor(QMainWindow):
             return
         super().keyPressEvent(event)
 
+    def changeEvent(self, event) -> None:
+        """Обновляет кнопки окна при смене состояния развёрнуто/обычно."""
+
+        if event.type() == QEvent.WindowStateChange:
+            self._update_window_control_buttons()
+        super().changeEvent(event)
+
     def _refresh_current_view(self) -> None:
         """Перерисовывает текущее изображение или кроп без смены выбранного контекста."""
         if not self.image_storage.images:
@@ -910,6 +942,7 @@ class ImageEditor(QMainWindow):
         toolbar.setMovable(False)
         toolbar.setIconSize(QSize(18, 18))
         toolbar.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.main_toolbar = toolbar
         self.addToolBar(toolbar)
 
         self.action_open = self._create_action(
@@ -961,6 +994,12 @@ class ImageEditor(QMainWindow):
             shortcut="Ctrl+P",
             fallback_standard_icon=QStyle.SP_FileDialogContentsView,
         )
+        self.action_logout = self._create_action(
+            "action_close.svg",
+            "Р’С‹Р№С‚Рё РёР· Р°РєРєР°СѓРЅС‚Р°",
+            self._request_logout,
+            fallback_standard_icon=QStyle.SP_DialogCloseButton,
+        )
         self.action_zoom_in = self._create_action(
             "action_zoom_in.svg",
             "Приблизить",
@@ -996,14 +1035,28 @@ class ImageEditor(QMainWindow):
         toolbar.addAction(self.action_zoom_in)
         toolbar.addAction(self.action_zoom_out)
         toolbar.addAction(self.action_fit)
+        toolbar.addSeparator()
+
+        self.window_drag_handle = QLabel("Seeding", toolbar)
+        self.window_drag_handle.setObjectName("toolbarBrand")
+        self.window_drag_handle.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        self.window_drag_handle.setSizePolicy(
+            QSizePolicy.Expanding,
+            QSizePolicy.Preferred,
+        )
+        self.window_drag_handle.installEventFilter(self)
+        toolbar.addWidget(self.window_drag_handle)
 
     def _build_menu(self) -> None:
         """Создаёт верхнее меню и раскладывает по нему основные действия окна."""
+        self.menuBar().setNativeMenuBar(False)
         file_menu = self.menuBar().addMenu("Файл")
         file_menu.addAction(self.action_open)
         file_menu.addAction(self.action_add)
         file_menu.addSeparator()
         file_menu.addAction(self.action_report)
+        file_menu.addSeparator()
+        file_menu.addAction(self.action_logout)
 
         analysis_menu = self.menuBar().addMenu("Анализ")
         analysis_menu.addAction(self.action_find)
@@ -1015,6 +1068,34 @@ class ImageEditor(QMainWindow):
         view_menu.addAction(self.action_zoom_in)
         view_menu.addAction(self.action_zoom_out)
         view_menu.addAction(self.action_fit)
+
+        self.window_controls_widget = QWidget(self.menuBar())
+        controls_layout = QHBoxLayout(self.window_controls_widget)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(6)
+
+        self.window_minimize_button = self._create_window_control_button(
+            QStyle.SP_TitleBarMinButton,
+            "Свернуть",
+            self.showMinimized,
+        )
+        controls_layout.addWidget(self.window_minimize_button)
+
+        self.window_maximize_button = self._create_window_control_button(
+            QStyle.SP_TitleBarMaxButton,
+            "Развернуть",
+            self._toggle_maximized,
+        )
+        controls_layout.addWidget(self.window_maximize_button)
+
+        self.window_close_button = self._create_window_control_button(
+            QStyle.SP_TitleBarCloseButton,
+            "Закрыть",
+            self.close,
+            role="close",
+        )
+        controls_layout.addWidget(self.window_close_button)
+        self.menuBar().setCornerWidget(self.window_controls_widget, Qt.TopRightCorner)
 
     def _create_action(
         self,
@@ -1039,6 +1120,256 @@ class ImageEditor(QMainWindow):
         action.triggered.connect(handler)
         return action
 
+    def _create_window_control_button(
+        self,
+        standard_icon: QStyle.StandardPixmap,
+        tooltip: str,
+        handler,
+        *,
+        role: str = "default",
+    ) -> QPushButton:
+        """Создаёт кнопку управления безрамочным окном."""
+
+        button = QPushButton(self.main_toolbar)
+        button.setProperty("windowControl", "true")
+        button.setProperty("controlRole", role)
+        button.setCursor(Qt.PointingHandCursor)
+        button.setToolTip(tooltip)
+        button.setIcon(self.style().standardIcon(standard_icon))
+        button.setFixedSize(36, 36)
+        button.clicked.connect(handler)
+        return button
+
+    def _toggle_maximized(self) -> None:
+        """Переключает состояние окна между обычным и развёрнутым."""
+
+        if self.isMaximized():
+            self.showNormal()
+        else:
+            self.showMaximized()
+        self._update_window_control_buttons()
+
+    def _update_window_control_buttons(self) -> None:
+        """Синхронизирует кнопку разворота с текущим состоянием окна."""
+
+        if not hasattr(self, "window_maximize_button"):
+            return
+        icon_type = (
+            QStyle.SP_TitleBarNormalButton
+            if self.isMaximized()
+            else QStyle.SP_TitleBarMaxButton
+        )
+        tooltip = "Восстановить размер" if self.isMaximized() else "Развернуть"
+        self.window_maximize_button.setIcon(self.style().standardIcon(icon_type))
+        self.window_maximize_button.setToolTip(tooltip)
+
+    def _install_frameless_event_filters(self) -> None:
+        """Включает обработку drag/resize для безрамочного окна."""
+
+        widgets: list[QWidget] = [self]
+        widgets.extend(self.findChildren(QWidget))
+        installed: set[int] = set()
+        for widget in widgets:
+            widget_id = id(widget)
+            if widget_id in installed:
+                continue
+            installed.add(widget_id)
+            widget.setMouseTracking(True)
+            if widget is not self.graphics_view.viewport():
+                widget.installEventFilter(self)
+
+    def _handle_frameless_window_event(self, watched, event) -> bool:
+        """Обрабатывает перетаскивание и изменение размера безрамочного окна."""
+
+        if not isinstance(watched, QWidget):
+            return False
+        if watched is not self and not self.isAncestorOf(watched):
+            return False
+        if event.type() not in {
+            QEvent.MouseButtonPress,
+            QEvent.MouseButtonRelease,
+            QEvent.MouseButtonDblClick,
+            QEvent.MouseMove,
+            QEvent.Leave,
+        }:
+            return False
+
+        window_pos = self._window_pos_from_widget_event(watched, event)
+        if window_pos is None:
+            return False
+
+        if event.type() == QEvent.MouseButtonDblClick and event.button() == Qt.LeftButton:
+            if self._is_window_drag_source(watched, event):
+                self._toggle_maximized()
+                event.accept()
+                return True
+            return False
+
+        if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+            edges = self._resize_edges_for_pos(window_pos)
+            if edges and not self.isMaximized():
+                self._resize_active = True
+                self._resize_edges = edges
+                self._resize_start_geometry = QRectF(self.geometry())
+                self._resize_start_global_pos = event.globalPos()
+                event.accept()
+                return True
+
+            if self._is_window_drag_source(watched, event) and not self.isMaximized():
+                self._window_drag_active = True
+                self._window_drag_offset = (
+                    event.globalPos() - self.frameGeometry().topLeft()
+                )
+                event.accept()
+                return True
+            return False
+
+        if event.type() == QEvent.MouseMove:
+            if self._resize_active and event.buttons() & Qt.LeftButton:
+                self._perform_window_resize(event.globalPos())
+                event.accept()
+                return True
+            if self._window_drag_active and event.buttons() & Qt.LeftButton:
+                self.move(event.globalPos() - self._window_drag_offset)
+                event.accept()
+                return True
+            self._update_resize_cursor(watched, window_pos)
+            return False
+
+        if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+            released = self._resize_active or self._window_drag_active
+            self._resize_active = False
+            self._resize_edges = Qt.Edges()
+            self._window_drag_active = False
+            self._update_resize_cursor(watched, window_pos)
+            if released:
+                event.accept()
+                return True
+            return False
+
+        if event.type() == QEvent.Leave and not (self._resize_active or self._window_drag_active):
+            watched.unsetCursor()
+        return False
+
+    def _window_pos_from_widget_event(self, watched: QWidget, event) -> QPoint | None:
+        """Преобразует позицию события виджета в координаты окна."""
+
+        if not hasattr(event, "pos"):
+            return None
+        if watched is self:
+            return event.pos()
+        return self.mapFromGlobal(watched.mapToGlobal(event.pos()))
+
+    def _is_window_drag_source(self, watched: QWidget, event) -> bool:
+        """Определяет, можно ли начать перетаскивание окна из этой области."""
+
+        if watched is getattr(self, "window_drag_handle", None):
+            return True
+
+        if watched is getattr(self, "main_toolbar", None):
+            child = watched.childAt(event.pos())
+            return child is None or child is self.window_drag_handle
+
+        if watched is self.menuBar():
+            corner_widget = self.menuBar().cornerWidget(Qt.TopRightCorner)
+            if corner_widget is not None and corner_widget.geometry().contains(event.pos()):
+                return False
+            return self.menuBar().actionAt(event.pos()) is None
+
+        return False
+
+    def _resize_edges_for_pos(self, pos: QPoint) -> Qt.Edges:
+        """Определяет активные края окна для изменения размера."""
+
+        if self.isMaximized():
+            return Qt.Edges()
+
+        edges = Qt.Edges()
+        rect = self.rect()
+        margin = self._resize_margin
+
+        if pos.x() <= rect.left() + margin:
+            edges |= Qt.LeftEdge
+        elif pos.x() >= rect.right() - margin:
+            edges |= Qt.RightEdge
+
+        if pos.y() <= rect.top() + margin:
+            edges |= Qt.TopEdge
+        elif pos.y() >= rect.bottom() - margin:
+            edges |= Qt.BottomEdge
+
+        return edges
+
+    def _cursor_for_edges(self, edges: Qt.Edges):
+        """Подбирает курсор под активные края ресайза."""
+
+        if edges in (Qt.LeftEdge, Qt.RightEdge):
+            return Qt.SizeHorCursor
+        if edges in (Qt.TopEdge, Qt.BottomEdge):
+            return Qt.SizeVerCursor
+        if edges in (
+            Qt.TopEdge | Qt.LeftEdge,
+            Qt.BottomEdge | Qt.RightEdge,
+        ):
+            return Qt.SizeFDiagCursor
+        if edges in (
+            Qt.TopEdge | Qt.RightEdge,
+            Qt.BottomEdge | Qt.LeftEdge,
+        ):
+            return Qt.SizeBDiagCursor
+        return None
+
+    def _update_resize_cursor(self, watched: QWidget, pos: QPoint) -> None:
+        """Обновляет курсор при наведении на границы окна."""
+
+        if watched is self.graphics_view.viewport() and self._measure_mode:
+            edges = self._resize_edges_for_pos(pos)
+            if not edges:
+                return
+        edges = self._resize_edges_for_pos(pos)
+        cursor = self._cursor_for_edges(edges)
+        if cursor is None:
+            watched.unsetCursor()
+            return
+        watched.setCursor(cursor)
+
+    def _perform_window_resize(self, global_pos: QPoint) -> None:
+        """Изменяет размер окна по активным краям."""
+
+        delta = global_pos - self._resize_start_global_pos
+        start = self._resize_start_geometry.toRect()
+        new_rect = QRectF(start)
+        minimum = self.minimumSizeHint().expandedTo(self.minimumSize())
+        min_width = max(480, minimum.width())
+        min_height = max(360, minimum.height())
+
+        if self._resize_edges & Qt.LeftEdge:
+            new_left = min(
+                start.right() - min_width + 1,
+                start.left() + delta.x(),
+            )
+            new_rect.setLeft(new_left)
+        if self._resize_edges & Qt.RightEdge:
+            new_right = max(
+                start.left() + min_width - 1,
+                start.right() + delta.x(),
+            )
+            new_rect.setRight(new_right)
+        if self._resize_edges & Qt.TopEdge:
+            new_top = min(
+                start.bottom() - min_height + 1,
+                start.top() + delta.y(),
+            )
+            new_rect.setTop(new_top)
+        if self._resize_edges & Qt.BottomEdge:
+            new_bottom = max(
+                start.top() + min_height - 1,
+                start.bottom() + delta.y(),
+            )
+            new_rect.setBottom(new_bottom)
+
+        self.setGeometry(new_rect.toRect())
+
     def _show_error(self, title: str, text: str) -> None:
         """Показывает модальное сообщение об ошибке."""
         QMessageBox.critical(self, title, text)
@@ -1046,6 +1377,11 @@ class ImageEditor(QMainWindow):
     def _show_info(self, title: str, text: str) -> None:
         """Показывает модальное информационное сообщение."""
         QMessageBox.information(self, title, text)
+
+    def _request_logout(self) -> None:
+        """Инициирует завершение текущей пользовательской сессии."""
+
+        self.logout_requested.emit()
 
     def _ensure_detect_model(self) -> InferenceBackend | None:
         """Лениво загружает модель детекции и возвращает её экземпляр."""

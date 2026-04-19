@@ -762,6 +762,39 @@ QToolBar#mainToolbar QToolButton:disabled {
     color: #647789;
 }
 
+QLabel#toolbarBrand {
+    color: #80d0b6;
+    font-size: 18px;
+    font-weight: 700;
+    padding: 0 12px;
+}
+
+QPushButton[windowControl="true"] {
+    min-width: 36px;
+    max-width: 36px;
+    min-height: 36px;
+    max-height: 36px;
+    padding: 0;
+    background: #101926;
+    color: #d8e5ef;
+    border: 1px solid #2b4158;
+    border-radius: 10px;
+}
+
+QPushButton[windowControl="true"]:hover {
+    background: #182635;
+    border: 1px solid #3a5671;
+}
+
+QPushButton[windowControl="true"]:pressed {
+    background: #0f1b27;
+}
+
+QPushButton[windowControl="true"][controlRole="close"]:hover {
+    background: #7f1d1d;
+    border: 1px solid #ef4444;
+}
+
 QListWidget#thumbnailList {
     background: #162230;
     color: #d3dde7;

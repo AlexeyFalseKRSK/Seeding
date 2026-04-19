@@ -69,6 +69,9 @@ def test_rotate_image_uses_current_display_after_stale_crop_selection():
     """Rotation should follow the displayed page instead of a stale crop."""
     app, created = _ensure_offscreen_qt()
     window = ImageEditor("dummy_weights.pt", "dummy_classify.pt")
+    assert window.windowFlags() & Qt.FramelessWindowHint
+    assert window.window_drag_handle.text() == "Seeding"
+    assert window.menuBar().cornerWidget(Qt.TopRightCorner) is window.window_controls_widget
     window._append_page(np.zeros((30, 10, 3), dtype=np.uint8), "first.pdf")
     window._append_page(np.zeros((12, 24, 3), dtype=np.uint8), "second.pdf")
     window.image_storage.class_object_image[0] = [
@@ -91,6 +94,40 @@ def test_rotate_image_uses_current_display_after_stale_crop_selection():
 
     assert window.app_state.selected_item == {"type": "pdf", "index": 1}
     assert window.image_storage.images[1].shape == (24, 12, 3)
+
+    window.close()
+    if created:
+        app.quit()
+
+
+def test_frameless_window_supports_drag_and_edge_detection():
+    """Проверяет наличие drag-зоны и определение краёв для ресайза."""
+
+    app, created = _ensure_offscreen_qt()
+    window = ImageEditor("dummy_weights.pt", "dummy_classify.pt")
+    window.resize(900, 600)
+
+    assert window._is_window_drag_source(window.window_drag_handle, None)
+    edges = window._resize_edges_for_pos(window.rect().topLeft() + QPointF(1, 1).toPoint())
+    assert edges & Qt.LeftEdge
+    assert edges & Qt.TopEdge
+
+    window.close()
+    if created:
+        app.quit()
+
+
+def test_logout_action_emits_logout_signal():
+    """Проверяет, что действие выхода переводит приложение в режим повторного входа."""
+
+    app, created = _ensure_offscreen_qt()
+    window = ImageEditor("dummy_weights.pt", "dummy_classify.pt")
+    emitted = []
+    window.logout_requested.connect(lambda: emitted.append(True))
+
+    window._request_logout()
+
+    assert emitted == [True]
 
     window.close()
     if created:
