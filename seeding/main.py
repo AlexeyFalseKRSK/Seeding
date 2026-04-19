@@ -17,6 +17,7 @@ from seeding.config import (
     DEFAULT_WEIGHTS_PATH,
     PROJECT_ROOT,
 )
+from seeding.ui.login_dialog import LoginDialog
 from seeding.ui.main_window import ImageEditor
 from seeding.ui.styles import build_main_stylesheet
 from seeding.utils import resolve_weights_path
@@ -31,6 +32,69 @@ def _resolve_model_path(path_value: str, *, default_path: Path) -> str | None:
     if fallback is not None:
         return str(fallback)
     return None
+
+
+class SessionController:
+    """Управляет входом пользователя и повторным открытием главного окна."""
+
+    def __init__(
+        self,
+        app: QApplication,
+        *,
+        weights_path: str,
+        classify_weights_path: str,
+    ) -> None:
+        """Сохраняет параметры запуска и текущее активное окно приложения."""
+
+        self.app = app
+        self.weights_path = weights_path
+        self.classify_weights_path = classify_weights_path
+        self.window: ImageEditor | None = None
+
+    def start(self) -> bool:
+        """Запускает первую пользовательскую сессию и сообщает, входить ли в event loop."""
+
+        if not self._show_login_dialog():
+            return False
+        self._show_main_window()
+        return True
+
+    def _show_login_dialog(self) -> bool:
+        """Показывает экран входа и возвращает признак успешной авторизации."""
+
+        login_dialog = LoginDialog()
+        return login_dialog.exec_() == LoginDialog.Accepted
+
+    def _show_main_window(self) -> None:
+        """Создаёт и показывает главное окно для новой сессии."""
+
+        window = ImageEditor(
+            weights_path=self.weights_path,
+            classify_weights_path=self.classify_weights_path,
+        )
+        window.logout_requested.connect(self._handle_logout_requested)
+        window.showMaximized()
+        self.window = window
+
+    def _handle_logout_requested(self) -> None:
+        """Завершает текущую сессию и возвращает пользователя на экран входа."""
+
+        if self.window is None:
+            return
+
+        previous_window = self.window
+        previous_window.hide()
+
+        if self._show_login_dialog():
+            self._show_main_window()
+            previous_window.close()
+            previous_window.deleteLater()
+            return
+
+        previous_window.close()
+        previous_window.deleteLater()
+        self.window = None
+        self.app.quit()
 
 
 def main() -> None:
@@ -71,11 +135,14 @@ def main() -> None:
     app.setFont(QFont(APP_FONT_FAMILY, APP_FONT_SIZE))
     app.setStyleSheet(build_main_stylesheet("dark"))
 
-    window = ImageEditor(
+    session_controller = SessionController(
+        app,
         weights_path=weights_path,
         classify_weights_path=classify_weights_path,
     )
-    window.showMaximized()
+    if not session_controller.start():
+        sys.exit(0)
+
     sys.exit(app.exec_())
 
 
