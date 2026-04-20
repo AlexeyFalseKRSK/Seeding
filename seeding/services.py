@@ -4,6 +4,12 @@ from __future__ import annotations
 
 import numpy as np
 
+from seeding.mask_refiner import (
+    bitmap_to_polygon,
+    polygon_to_bitmap,
+    refine_mask_bitmap,
+    rotate_bitmap,
+)
 from seeding.models import (
     AllClassImage,
     AppState,
@@ -154,14 +160,15 @@ def rotate_crop(
         obj.image_all_class[class_idx].bbox = rotated_class_boxes[mapped_idx]
     if obj.image_all_class:
         for cls_obj in obj.image_all_class:
-            if cls_obj.mask_polygon is None:
-                continue
-            cls_obj.mask_polygon = rotate_polygon_points(
-                cls_obj.mask_polygon,
-                crop_width,
-                crop_height,
-                angle,
-            )
+            if cls_obj.mask_polygon is not None:
+                cls_obj.mask_polygon = rotate_polygon_points(
+                    cls_obj.mask_polygon,
+                    crop_width,
+                    crop_height,
+                    angle,
+                )
+            if cls_obj.mask_bitmap is not None:
+                cls_obj.mask_bitmap = rotate_bitmap(cls_obj.mask_bitmap, angle)
     return rotated_crop
 
 
@@ -215,22 +222,6 @@ def rotate_selection(
         )
 
     return None
-
-
-def rotate_current(
-    state: AppState,
-    selection: SelectionPayload,
-    *,
-    angle: float,
-    rotate_k: int,
-) -> RotateSelectionResult | None:
-    """Синоним сценария поворота текущего выбранного элемента."""
-    return rotate_selection(
-        state,
-        selection,
-        angle=angle,
-        rotate_k=rotate_k,
-    )
 
 
 def build_detected_objects(
@@ -396,6 +387,23 @@ def build_classified_parts(
                 crop_width,
                 crop_height,
             )
+
+            # Строим попиксельный bitmap: растеризация полигона → Otsu-уточнение
+            mask_bitmap: np.ndarray | None = None
+            coarse_bitmap = polygon_to_bitmap(
+                mask_polygon, crop_height, crop_width
+            )
+            if coarse_bitmap is not None:
+                refined_bitmap = refine_mask_bitmap(crop_image, coarse_bitmap)
+                if refined_bitmap is not None:
+                    mask_bitmap = refined_bitmap
+                    # Обновляем полигон как наибольший контур уточнённой маски
+                    refined_polygon = bitmap_to_polygon(refined_bitmap)
+                    if refined_polygon is not None:
+                        mask_polygon = _clip_mask_polygon(
+                            refined_polygon, crop_width, crop_height
+                        )
+
             parts.append(
                 AllClassImage(
                     class_name=class_name,
@@ -403,6 +411,7 @@ def build_classified_parts(
                     image=part_image,
                     bbox=local_bbox,
                     mask_polygon=mask_polygon,
+                    mask_bitmap=mask_bitmap,
                 )
             )
     return parts
@@ -446,7 +455,6 @@ __all__ = [
     "generate_report",
     "refresh_page_crops",
     "rotate_crop",
-    "rotate_current",
     "rotate_page",
     "rotate_selection",
     "run_classification_for_selection",

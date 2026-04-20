@@ -66,7 +66,7 @@ def test_append_page_keeps_storage_lists_in_sync():
 
 
 def test_rotate_image_uses_current_display_after_stale_crop_selection():
-    """Rotation should follow the displayed page instead of a stale crop."""
+    """Проверяет, что поворот применяется к текущей странице, а не к устаревшему кропу."""
     app, created = _ensure_offscreen_qt()
     window = ImageEditor("dummy_weights.pt", "dummy_classify.pt")
     assert window.windowFlags() & Qt.FramelessWindowHint
@@ -210,7 +210,11 @@ def test_classify_adds_parts_to_detected_object():
     assert len(parts) == 1
     assert parts[0].class_name == "root"
     assert parts[0].mask_polygon is not None
-    assert parts[0].mask_polygon.shape == (4, 2)
+    # Полигон теперь извлекается из уточнённого bitmap, точное число вершин
+    # варьируется; проверяем корректность формы
+    assert parts[0].mask_polygon.ndim == 2
+    assert parts[0].mask_polygon.shape[1] == 2
+    assert parts[0].mask_polygon.shape[0] >= 3
 
     window.close()
     if created:

@@ -13,13 +13,20 @@ BBox = tuple[int, int, int, int]
 
 @dataclass
 class AllClassImage:
-    """Описывает найденную часть растения, её bbox, изображение и маску."""
+    """Описывает найденную часть растения, её bbox, изображение и маску.
+
+    ``mask_polygon`` — контур (для совместимости, экспорта и редактирования).
+    ``mask_bitmap`` — попиксельная маска uint8 0/255 в координатах crop-изображения
+    родительского сеянца. Используется для точного рендеринга тонких/ветвящихся
+    структур (хвоя, корни) и расчёта площади.
+    """
 
     class_name: str
     confidence: float
     image: np.ndarray | Image.Image
     bbox: BBox | None = None
     mask_polygon: np.ndarray | None = None
+    mask_bitmap: np.ndarray | None = None
 
 
 @dataclass
