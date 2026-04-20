@@ -1806,6 +1806,7 @@ class ImageEditor(QMainWindow):
                     "seeding",
                     obj.image[0] if obj.image else None,
                     confidence=obj.confidence,
+                    manual=getattr(obj, "manual", False),
                 )
                 for class_index, part in enumerate(obj.image_all_class or []):
                     self.tree_widget.add_class_item(
@@ -1816,6 +1817,7 @@ class ImageEditor(QMainWindow):
                         object_index,
                         class_index,
                         confidence=part.confidence,
+                        manual=getattr(part, "manual", False),
                     )
                 child.setExpanded(False)
             root.setExpanded(False)
