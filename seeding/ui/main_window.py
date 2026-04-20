@@ -2098,7 +2098,6 @@ class ImageEditor(QMainWindow):
         Дыры (просветы между хвоинками/корнями) автоматически прозрачны —
         путь строится по всем контурам через RETR_CCOMP.
         """
-        h, w = bitmap.shape[:2]
         binary = (bitmap > 0).astype(np.uint8) * 255
         if not np.any(binary):
             return
@@ -2113,6 +2112,7 @@ class ImageEditor(QMainWindow):
             poly = QPolygonF([QPointF(float(x), float(y)) for x, y in contour])
             sub = QPainterPath()
             sub.addPolygon(poly)
+            sub.closeSubpath()
             path.addPath(sub)
 
         path_item = QGraphicsPathItem(path)
