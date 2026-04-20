@@ -63,6 +63,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from seeding.auth import AuthUser
 from seeding.config import (
     CALIBRATION_PIXELS_PER_MM_DEFAULT,
     CLASS_DISPLAY_NAMES,
@@ -94,7 +95,7 @@ from seeding.models import (
 )
 from seeding.services import (
     generate_report,
-    rotate_current,
+    rotate_selection,
     run_classification_for_selection,
     run_detection,
 )
@@ -103,6 +104,7 @@ from seeding.ui.icon_manager import IconManager
 from seeding.ui.statistics_panel import StatisticsPanel
 from seeding.ui.thumbnails_panel import ThumbnailsPanel
 from seeding.ui.tree_widget import LayerTreeWidget
+from seeding.user_service import record_user_action
 from seeding.utils import clip_bbox_to_image, rotate_bbox
 
 logger = logging.getLogger(__name__)
@@ -167,6 +169,7 @@ class ImageEditor(QMainWindow):
         self,
         weights_path: str,
         classify_weights_path: str | None = None,
+        current_user: AuthUser | None = None,
     ) -> None:
         """Инициализирует состояние окна, модели, настройки и основные элементы UI."""
         super().__init__()
@@ -174,6 +177,7 @@ class ImageEditor(QMainWindow):
         self.classify_weights_path = str(
             classify_weights_path or DEFAULT_CLASSIFY_WEIGHTS_PATH
         )
+        self.current_user = current_user
         self.detect_model: InferenceBackend | None = None
         self.classify_model: InferenceBackend | None = None
         self.app_state = AppState(image_storage=OriginalImage())
@@ -218,6 +222,21 @@ class ImageEditor(QMainWindow):
         self._update_window_control_buttons()
         QShortcut(QKeySequence("M"), self, self.toggle_measure_mode)
         self.statusBar().showMessage("Откройте изображение или PDF", 3000)
+
+    def _log_action(self, action: str, details: str | None = None) -> None:
+        """Сохраняет действие пользователя, не прерывая UI при ошибках логирования."""
+
+        if self.current_user is None:
+            return
+        try:
+            record_user_action(self.current_user.id, action, details)
+        except Exception:
+            logger.exception("Не удалось записать лог действия %s", action)
+
+    def _log_error(self, details: str) -> None:
+        """Сохраняет минимальную запись об ошибке приложения для текущего пользователя."""
+
+        self._log_action("application_error", details)
 
     def _build_ui(self) -> None:
         """Строит основную компоновку окна, панели, холст и вкладки боковой панели."""
@@ -1391,6 +1410,9 @@ class ImageEditor(QMainWindow):
             self.detect_model = load_inference_backend(self.weights_path)
             return self.detect_model
         except Exception as error:
+            self._log_error(
+                f"Не удалось загрузить модель детекции: {self.weights_path}. Ошибка: {error}"
+            )
             logger.exception("Не удалось загрузить модель детекции")
             self._show_error(
                 "Ошибка модели детекции",
@@ -1406,6 +1428,10 @@ class ImageEditor(QMainWindow):
             self.classify_model = load_inference_backend(self.classify_weights_path)
             return self.classify_model
         except Exception as error:
+            self._log_error(
+                "Не удалось загрузить модель классификации: "
+                f"{self.classify_weights_path}. Ошибка: {error}"
+            )
             logger.exception("Не удалось загрузить модель классификации")
             self._show_error(
                 "Ошибка модели классификации",
@@ -1455,6 +1481,10 @@ class ImageEditor(QMainWindow):
             return
         self.clear_project()
         self._add_files_from_paths(paths)
+        self._log_action(
+            "upload_image",
+            f"Загружено файлов в новый проект: {len(paths)}",
+        )
 
     def add_files(self) -> None:
         """Открывает диалог выбора файлов и добавляет их в текущий проект."""
@@ -1467,6 +1497,10 @@ class ImageEditor(QMainWindow):
         if not paths:
             return
         self._add_files_from_paths(paths)
+        self._log_action(
+            "upload_image",
+            f"Добавлено файлов в текущий проект: {len(paths)}",
+        )
 
     def _add_files_from_paths(self, paths: list[str]) -> None:
         """Загружает набор путей и переключается на первую успешно добавленную страницу."""
@@ -1493,6 +1527,7 @@ class ImageEditor(QMainWindow):
         """Загружает одно изображение с диска и добавляет его как страницу проекта."""
         image = cv2.imread(file_path)
         if image is None:
+            self._log_error(f"Не удалось открыть изображение: {file_path}")
             self._show_error(
                 "Ошибка открытия",
                 f"Не удалось открыть изображение:\n{file_path}",
@@ -1542,6 +1577,7 @@ class ImageEditor(QMainWindow):
             progress.close()
         except Exception as error:
             logger.exception("Не удалось загрузить PDF %s", pdf_path)
+            self._log_error(f"Не удалось загрузить PDF {pdf_path}. Ошибка: {error}")
             self._show_error(
                 "Ошибка PDF",
                 f"Не удалось загрузить PDF:\n{pdf_path}\n\n{error}",
@@ -1893,7 +1929,18 @@ class ImageEditor(QMainWindow):
         return QColor(46, 226, 201, 70), QColor(46, 226, 201, 190)
 
     def _add_part_mask_item(self, part_obj: AllClassImage) -> None:
-        """Добавляет на сцену полигон маски классифицированной части растения."""
+        """Отображает маску части растения.
+
+        Приоритет у попиксельного bitmap (точное покрытие тонких структур),
+        fallback — полигональный контур (совместимость со старыми данными).
+        """
+        fill_color, outline_color = self._part_mask_colors(part_obj.class_name)
+
+        bitmap = getattr(part_obj, "mask_bitmap", None)
+        if isinstance(bitmap, np.ndarray) and bitmap.ndim == 2 and bitmap.size > 0:
+            self._add_bitmap_mask_item(bitmap, fill_color, outline_color)
+            return
+
         polygon = getattr(part_obj, "mask_polygon", None)
         if polygon is None:
             return
@@ -1903,7 +1950,6 @@ class ImageEditor(QMainWindow):
             return
 
         q_polygon = QPolygonF([QPointF(float(x), float(y)) for x, y in points])
-        fill_color, outline_color = self._part_mask_colors(part_obj.class_name)
         item = self.graphics_scene.addPolygon(
             q_polygon,
             QPen(outline_color, 2),
@@ -1913,12 +1959,63 @@ class ImageEditor(QMainWindow):
         item.setZValue(0.5)
         self.mask_items.append(item)
 
+    def _add_bitmap_mask_item(
+        self,
+        bitmap: np.ndarray,
+        fill_color: QColor,
+        outline_color: QColor,
+    ) -> None:
+        """Рендерит bitmap-маску как полупрозрачный цветной overlay + контур."""
+        h, w = bitmap.shape[:2]
+        binary = (bitmap > 0).astype(np.uint8)
+        if not np.any(binary):
+            return
+
+        # RGBA overlay: где маска=1, кладём цвет заливки с его alpha
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        mask_idx = binary > 0
+        rgba[mask_idx, 0] = fill_color.red()
+        rgba[mask_idx, 1] = fill_color.green()
+        rgba[mask_idx, 2] = fill_color.blue()
+        rgba[mask_idx, 3] = fill_color.alpha()
+
+        # Contiguous + правильный stride для QImage
+        rgba = np.ascontiguousarray(rgba)
+        qimage = QImage(
+            rgba.data, w, h, w * 4, QImage.Format_RGBA8888
+        ).copy()  # .copy() — чтобы не держать ссылку на numpy-буфер
+        pixmap = QPixmap.fromImage(qimage)
+        pix_item = self.graphics_scene.addPixmap(pixmap)
+        pix_item.setAcceptedMouseButtons(Qt.NoButton)
+        pix_item.setZValue(0.5)
+        self.mask_items.append(pix_item)
+
+        # Контуры всех компонент связности
+        contours, _ = cv2.findContours(
+            binary * 255, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        for contour in contours:
+            if len(contour) < 3:
+                continue
+            pts = contour.reshape(-1, 2)
+            q_polygon = QPolygonF(
+                [QPointF(float(x), float(y)) for x, y in pts]
+            )
+            outline_item = self.graphics_scene.addPolygon(
+                q_polygon,
+                QPen(outline_color, 1.5),
+                QBrush(Qt.transparent),
+            )
+            outline_item.setAcceptedMouseButtons(Qt.NoButton)
+            outline_item.setZValue(0.6)
+            self.mask_items.append(outline_item)
+
     def _selection_payload_for_display(
         self,
         img_idx: int,
         seeding_idx: int | None = None,
     ) -> SelectionPayload:
-        """Builds the action selection payload for the currently displayed item."""
+        """Формирует payload выбора действия для текущего отображаемого элемента."""
         if seeding_idx is not None:
             return {"type": "seeding", "parent_index": img_idx, "index": seeding_idx}
 
@@ -2104,6 +2201,10 @@ class ImageEditor(QMainWindow):
         self._refresh_tree()
         self._refresh_statistics_panel()
         self._restore_display(preserve_view=True)
+        self._log_action(
+            "run_analysis",
+            f"Детекция завершена для страницы {self._active_image_index}; объектов: {len(objects)}",
+        )
         self.statusBar().showMessage(f"Найдено растений: {len(objects)}", 3000)
 
     def find_all_seedlings(self) -> None:
@@ -2149,6 +2250,10 @@ class ImageEditor(QMainWindow):
         self._refresh_tree()
         self._refresh_statistics_panel()
         self._restore_display(preserve_view=True)
+        self._log_action(
+            "run_analysis",
+            f"Пакетная детекция завершена; обработано {processed} из {total}",
+        )
         self.statusBar().showMessage(
             f"Пакетная детекция растений завершена: {processed}/{total}",
             3000,
@@ -2208,6 +2313,10 @@ class ImageEditor(QMainWindow):
         self._refresh_tree()
         self._refresh_statistics_panel()
         self._restore_display(preserve_view=True)
+        self._log_action(
+            "run_analysis",
+            f"Классификация завершена; обработано объектов: {processed}",
+        )
         self.statusBar().showMessage("Классификация завершена", 3000)
 
     def rotate_image(self) -> None:
@@ -2225,7 +2334,7 @@ class ImageEditor(QMainWindow):
                 "index": int(selection["seeding_index"]),
             }
 
-        result = rotate_current(
+        result = rotate_selection(
             self.app_state,
             selection,
             angle=ROTATE_ANGLE_DEG,
@@ -2278,9 +2387,16 @@ class ImageEditor(QMainWindow):
                 output_path,
             )
             self.app_state.last_report_path = saved_path
+            self._log_action(
+                "generate_report",
+                f"Сформирован PDF-отчёт: {saved_path}",
+            )
             self._show_info("Отчёт создан", f"Отчёт сохранён:\n{saved_path}")
         except Exception as error:
             logger.exception("Ошибка создания отчёта")
+            self._log_error(
+                f"Не удалось создать PDF-отчёт {output_path}. Ошибка: {error}"
+            )
             self._show_error(
                 "Ошибка отчёта",
                 f"Не удалось создать PDF-отчёт:\n{error}",

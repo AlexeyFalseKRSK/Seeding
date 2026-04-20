@@ -20,3 +20,4 @@ dependencies = [
 
 [project.scripts]
 seeding = "seeding:main"
+seeding-users = "seeding.manage_users:main"

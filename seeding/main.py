@@ -1,4 +1,4 @@
-"""Точка входа для запуска графического приложения Seeding."""
+"""Точка входа настольного клиента Seeding."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from pathlib import Path
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import QApplication, QMessageBox
 
+from seeding.auth import AuthUser
 from seeding.config import (
     APP_FONT_FAMILY,
     APP_FONT_SIZE,
@@ -20,11 +21,19 @@ from seeding.config import (
 from seeding.ui.login_dialog import LoginDialog
 from seeding.ui.main_window import ImageEditor
 from seeding.ui.styles import build_main_stylesheet
+from seeding.user_service import (
+    StorageUnavailableError,
+    initialize_user_storage,
+    record_user_action,
+)
 from seeding.utils import resolve_weights_path
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_model_path(path_value: str, *, default_path: Path) -> str | None:
-    """Пытается найти путь к модели и при необходимости использует резервный."""
+    """Разрешает путь к модели с резервным переходом к пути проекта по умолчанию."""
+
     resolved = resolve_weights_path(path_value, base_dirs=(PROJECT_ROOT, Path.cwd()))
     if resolved is not None:
         return str(resolved)
@@ -34,8 +43,21 @@ def _resolve_model_path(path_value: str, *, default_path: Path) -> str | None:
     return None
 
 
+def _show_startup_error(message: str) -> None:
+    """Показывает критическое сообщение при ошибке запуска приложения."""
+
+    app = QApplication.instance()
+    created = False
+    if app is None:
+        app = QApplication(sys.argv)
+        created = True
+    QMessageBox.critical(None, "Ошибка запуска", message)
+    if created:
+        app.quit()
+
+
 class SessionController:
-    """Управляет входом пользователя и повторным открытием главного окна."""
+    """Управляет входом, выходом и повторным открытием главного окна приложения."""
 
     def __init__(
         self,
@@ -44,46 +66,79 @@ class SessionController:
         weights_path: str,
         classify_weights_path: str,
     ) -> None:
-        """Сохраняет параметры запуска и текущее активное окно приложения."""
-
         self.app = app
         self.weights_path = weights_path
         self.classify_weights_path = classify_weights_path
         self.window: ImageEditor | None = None
+        self.current_user: AuthUser | None = None
 
     def start(self) -> bool:
-        """Запускает первую пользовательскую сессию и сообщает, входить ли в event loop."""
+        """Запускает первую пользовательскую сессию."""
 
         if not self._show_login_dialog():
             return False
         self._show_main_window()
         return True
 
+    def _record_action(
+        self,
+        user_id: int,
+        action: str,
+        details: str | None = None,
+    ) -> None:
+        """Записывает действие пользователя, не прерывая работу сессии."""
+
+        try:
+            record_user_action(user_id, action, details)
+        except Exception:
+            logger.exception("Не удалось записать лог действия '%s'", action)
+
     def _show_login_dialog(self) -> bool:
-        """Показывает экран входа и возвращает признак успешной авторизации."""
+        """Показывает форму входа и сохраняет аутентифицированного пользователя."""
 
         login_dialog = LoginDialog()
-        return login_dialog.exec_() == LoginDialog.Accepted
+        if login_dialog.exec_() != LoginDialog.Accepted:
+            return False
+
+        user = login_dialog.authenticated_user
+        if user is None:
+            return False
+
+        self.current_user = user
+        self._record_action(
+            user.id,
+            "login",
+            "Пользователь выполнил вход в настольное приложение.",
+        )
+        return True
 
     def _show_main_window(self) -> None:
-        """Создаёт и показывает главное окно для новой сессии."""
+        """Создаёт и показывает главное окно для текущей сессии."""
 
         window = ImageEditor(
             weights_path=self.weights_path,
             classify_weights_path=self.classify_weights_path,
+            current_user=self.current_user,
         )
         window.logout_requested.connect(self._handle_logout_requested)
         window.showMaximized()
         self.window = window
 
     def _handle_logout_requested(self) -> None:
-        """Завершает текущую сессию и возвращает пользователя на экран входа."""
+        """Завершает текущую сессию и возвращает пользователя к форме входа."""
 
         if self.window is None:
             return
 
         previous_window = self.window
         previous_window.hide()
+
+        if self.current_user is not None:
+            self._record_action(
+                self.current_user.id,
+                "logout",
+                "Пользователь вышел из настольного приложения.",
+            )
 
         if self._show_login_dialog():
             self._show_main_window()
@@ -94,11 +149,13 @@ class SessionController:
         previous_window.close()
         previous_window.deleteLater()
         self.window = None
+        self.current_user = None
         self.app.quit()
 
 
 def main() -> None:
-    """Настраивает приложение, проверяет пути к моделям и запускает главное окно."""
+    """Настраивает и запускает графическое приложение."""
+
     parser = argparse.ArgumentParser(description="Seeding")
     parser.add_argument(
         "--weights",
@@ -117,18 +174,22 @@ def main() -> None:
         format="%(levelname)s - %(name)s - %(message)s",
     )
 
+    try:
+        initialize_user_storage()
+    except StorageUnavailableError as error:
+        _show_startup_error(
+            "Не удалось инициализировать локальную базу данных.\n\n"
+            f"{error}"
+        )
+        sys.exit(1)
+
     weights_path = _resolve_model_path(args.weights, default_path=DEFAULT_WEIGHTS_PATH)
     classify_weights_path = _resolve_model_path(
         args.classify_weights,
         default_path=DEFAULT_CLASSIFY_WEIGHTS_PATH,
     )
     if weights_path is None or classify_weights_path is None:
-        app = QApplication(sys.argv)
-        QMessageBox.critical(
-            None,
-            "Ошибка моделей",
-            "Не удалось найти один или оба файла моделей.",
-        )
+        _show_startup_error("Не удалось найти один или оба файла моделей.")
         sys.exit(1)
 
     app = QApplication(sys.argv)
