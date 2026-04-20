@@ -6,6 +6,13 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import QAbstractItemView, QHeaderView, QTreeWidget, QTreeWidgetItem
 
+_CLASS_ICONS: dict[str, str] = {
+    "root": "🫚",
+    "stem": "🌿",
+    "flower": "🌸",
+    "inflorescence": "🌸",
+}
+
 
 class LayerTreeWidget(QTreeWidget):
     """Отображает иерархию страниц, объектов и классифицированных частей."""
@@ -94,16 +101,12 @@ class LayerTreeWidget(QTreeWidget):
         class_index: int,
         confidence: float | None = None,
         manual: bool = False,
+        class_name: str | None = None,
     ) -> QTreeWidgetItem:
         """Добавляет узел части растения с иконкой по классу."""
-        _CLASS_ICONS = {
-            "root": "🫚",
-            "stem": "🌿",
-            "flower": "🌸",
-            "inflorescence": "🌸",
-        }
         child = QTreeWidgetItem(parent)
-        icon = _CLASS_ICONS.get((name or "").strip().lower(), "🔹")
+        lookup_key = (class_name or name or "").strip().lower()
+        icon = _CLASS_ICONS.get(lookup_key, "🔹")
         prefix = "✏ " if manual else icon + " "
         child.setText(0, prefix + name)
         child.setText(1, description)
@@ -124,5 +127,8 @@ class LayerTreeWidget(QTreeWidget):
                 child.setBackground(0, warn_color)
                 child.setBackground(1, warn_color)
                 child.setForeground(0, QColor(255, 150, 80))
+            else:
+                child.setBackground(0, QColor(0, 0, 0, 0))
+                child.setBackground(1, QColor(0, 0, 0, 0))
         parent.addChild(child)
         return child

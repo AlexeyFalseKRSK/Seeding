@@ -1818,6 +1818,7 @@ class ImageEditor(QMainWindow):
                         class_index,
                         confidence=part.confidence,
                         manual=getattr(part, "manual", False),
+                        class_name=part.class_name,
                     )
                 child.setExpanded(False)
             root.setExpanded(False)
