@@ -1,5 +1,4 @@
 import numpy as np
-import pytest
 from seeding.mask_refiner import bitmap_to_contours
 
 
