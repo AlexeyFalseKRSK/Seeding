@@ -28,6 +28,7 @@ from PyQt5.QtGui import (
     QImage,
     QKeySequence,
     QPainter,
+    QPainterPath,
     QPen,
     QPixmap,
     QPolygonF,
@@ -35,10 +36,13 @@ from PyQt5.QtGui import (
 )
 from PyQt5.QtWidgets import (
     QAction,
+    QApplication,
+    QDialog,
     QFrame,
     QFileDialog,
     QGraphicsItem,
     QGraphicsLineItem,
+    QGraphicsPathItem,
     QGraphicsPixmapItem,
     QGraphicsScene,
     QGraphicsTextItem,
@@ -51,7 +55,7 @@ from PyQt5.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
-    QProgressDialog,
+    QProgressBar,
     QShortcut,
     QSizePolicy,
     QSplitter,
@@ -64,6 +68,7 @@ from PyQt5.QtWidgets import (
 )
 
 from seeding.auth import AuthUser
+from seeding.mask_refiner import bitmap_to_contours
 from seeding.config import (
     CALIBRATION_PIXELS_PER_MM_DEFAULT,
     CLASS_DISPLAY_NAMES,
@@ -160,6 +165,97 @@ class CanvasGraphicsView(QGraphicsView):
         super().mouseReleaseEvent(event)
 
 
+class TaskProgressDialog(QDialog):
+    """Компактный диалог прогресса в стиле приложения."""
+
+    def __init__(
+        self,
+        title: str,
+        message: str,
+        *,
+        maximum: int,
+        parent: QWidget | None = None,
+        cancel_text: str = "Отмена",
+    ) -> None:
+        super().__init__(parent)
+        self._canceled = False
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.setMinimumWidth(420)
+        self.setObjectName("panelCard")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        self.title_label = QLabel(title, self)
+        self.title_label.setObjectName("panelCardTitle")
+        layout.addWidget(self.title_label)
+
+        self.message_label = QLabel(message, self)
+        self.message_label.setObjectName("panelHint")
+        self.message_label.setWordWrap(True)
+        layout.addWidget(self.message_label)
+
+        self.progress_bar = QProgressBar(self)
+        self.progress_bar.setRange(0, maximum)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFormat("%v / %m")
+        layout.addWidget(self.progress_bar)
+
+        self.detail_label = QLabel("", self)
+        self.detail_label.setObjectName("panelHint")
+        self.detail_label.setWordWrap(True)
+        self.detail_label.setVisible(False)
+        layout.addWidget(self.detail_label)
+
+        actions_layout = QHBoxLayout()
+        actions_layout.addStretch(1)
+        self.cancel_button = QPushButton(cancel_text, self)
+        self.cancel_button.setProperty("variant", "secondary")
+        self.cancel_button.clicked.connect(self._handle_cancel)
+        actions_layout.addWidget(self.cancel_button)
+        layout.addLayout(actions_layout)
+
+    def _handle_cancel(self) -> None:
+        """Помечает операцию как отменённую и закрывает диалог."""
+
+        self._canceled = True
+        self.close()
+
+    def set_message(self, message: str, *, detail: str | None = None) -> None:
+        """Обновляет подпись и дополнительный статус."""
+
+        self.message_label.setText(message)
+        if detail:
+            self.detail_label.setText(detail)
+            self.detail_label.setVisible(True)
+        else:
+            self.detail_label.clear()
+            self.detail_label.setVisible(False)
+        QApplication.processEvents()
+
+    def set_progress(
+        self,
+        value: int,
+        *,
+        message: str | None = None,
+        detail: str | None = None,
+    ) -> None:
+        """Обновляет значение прогресса и подписи."""
+
+        if message is not None or detail is not None:
+            self.set_message(message or self.message_label.text(), detail=detail)
+        self.progress_bar.setValue(value)
+        QApplication.processEvents()
+
+    def was_canceled(self) -> bool:
+        """Возвращает `True`, если пользователь отменил операцию."""
+
+        return self._canceled
+
+
 class ImageEditor(QMainWindow):
     """Главное окно приложения с загрузкой файлов, анализом и просмотром результатов."""
 
@@ -222,6 +318,40 @@ class ImageEditor(QMainWindow):
         self._update_window_control_buttons()
         QShortcut(QKeySequence("M"), self, self.toggle_measure_mode)
         self.statusBar().showMessage("Откройте изображение или PDF", 3000)
+
+    def preload_models(self) -> bool:
+        """Предзагружает модели детекции и сегментации после старта окна."""
+
+        progress = TaskProgressDialog(
+            "Подготовка моделей",
+            "Загружаем модели AI для детекции и сегментации...",
+            maximum=2,
+            parent=self,
+        )
+        progress.cancel_button.setEnabled(False)
+        progress.show()
+        QApplication.processEvents()
+
+        if self._ensure_detect_model() is None:
+            progress.close()
+            return False
+        progress.set_progress(
+            1,
+            message="Модель детекции готова.",
+            detail=Path(self.weights_path).name,
+        )
+
+        if self._ensure_classify_model() is None:
+            progress.close()
+            return False
+        progress.set_progress(
+            2,
+            message="Модель сегментации готова.",
+            detail=Path(self.classify_weights_path).name,
+        )
+        progress.close()
+        self.statusBar().showMessage("Модели загружены и готовы к работе", 3000)
+        return True
 
     def _log_action(self, action: str, details: str | None = None) -> None:
         """Сохраняет действие пользователя, не прерывая UI при ошибках логирования."""
@@ -466,7 +596,7 @@ class ImageEditor(QMainWindow):
         layout.addWidget(title)
 
         hint = QLabel(
-            "После загрузки можно найти растения, классифицировать части и "
+            "После загрузки можно найти растения, сегментировать части и "
             "сохранить PDF-отчет.",
             empty_state,
         )
@@ -994,7 +1124,7 @@ class ImageEditor(QMainWindow):
         )
         self.action_classify = self._create_action(
             "action_classify.svg",
-            "Классифицировать",
+            "Сегментация",
             self.classify,
             shortcut="Ctrl+C",
             fallback_standard_icon=QStyle.SP_FileDialogDetailedView,
@@ -1421,7 +1551,7 @@ class ImageEditor(QMainWindow):
             return None
 
     def _ensure_classify_model(self) -> InferenceBackend | None:
-        """Лениво загружает модель классификации частей и возвращает её экземпляр."""
+        """Лениво загружает модель сегментации частей и возвращает её экземпляр."""
         if self.classify_model is not None:
             return self.classify_model
         try:
@@ -1429,12 +1559,12 @@ class ImageEditor(QMainWindow):
             return self.classify_model
         except Exception as error:
             self._log_error(
-                "Не удалось загрузить модель классификации: "
+                "Не удалось загрузить модель сегментации: "
                 f"{self.classify_weights_path}. Ошибка: {error}"
             )
-            logger.exception("Не удалось загрузить модель классификации")
+            logger.exception("Не удалось загрузить модель сегментации")
             self._show_error(
-                "Ошибка модели классификации",
+                "Ошибка модели сегментации",
                 (
                     "Не удалось загрузить модель:\n"
                     f"{self.classify_weights_path}\n\n{error}"
@@ -1543,18 +1673,16 @@ class ImageEditor(QMainWindow):
         try:
             doc = fitz.open(pdf_path)
             total = int(doc.page_count)
-            progress = QProgressDialog(
-                "Загрузка PDF...",
-                "Отмена",
-                0,
-                total,
-                self,
+            progress = TaskProgressDialog(
+                "Загрузка PDF",
+                "Подготавливаем страницы документа...",
+                maximum=total,
+                parent=self,
             )
-            progress.setWindowModality(Qt.WindowModal)
             progress.show()
 
             for page_num in range(total):
-                if progress.wasCanceled():
+                if progress.was_canceled():
                     break
                 page = doc.load_page(page_num)
                 pix = page.get_pixmap(
@@ -1572,7 +1700,7 @@ class ImageEditor(QMainWindow):
                     image = image[:, :, :3].copy()
                 image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
                 pages.append(self._append_page(image, pdf_path))
-                progress.setValue(page_num + 1)
+                progress.set_progress(page_num + 1)
 
             progress.close()
         except Exception as error:
@@ -1965,50 +2093,35 @@ class ImageEditor(QMainWindow):
         fill_color: QColor,
         outline_color: QColor,
     ) -> None:
-        """Рендерит bitmap-маску как полупрозрачный цветной overlay + контур."""
+        """Рендерит bitmap-маску как QPainterPath с OddEvenFill.
+
+        Дыры (просветы между хвоинками/корнями) автоматически прозрачны —
+        путь строится по всем контурам через RETR_CCOMP.
+        """
         h, w = bitmap.shape[:2]
-        binary = (bitmap > 0).astype(np.uint8)
+        binary = (bitmap > 0).astype(np.uint8) * 255
         if not np.any(binary):
             return
 
-        # RGBA overlay: где маска=1, кладём цвет заливки с его alpha
-        rgba = np.zeros((h, w, 4), dtype=np.uint8)
-        mask_idx = binary > 0
-        rgba[mask_idx, 0] = fill_color.red()
-        rgba[mask_idx, 1] = fill_color.green()
-        rgba[mask_idx, 2] = fill_color.blue()
-        rgba[mask_idx, 3] = fill_color.alpha()
+        contours = bitmap_to_contours(binary)
+        if not contours:
+            return
 
-        # Contiguous + правильный stride для QImage
-        rgba = np.ascontiguousarray(rgba)
-        qimage = QImage(
-            rgba.data, w, h, w * 4, QImage.Format_RGBA8888
-        ).copy()  # .copy() — чтобы не держать ссылку на numpy-буфер
-        pixmap = QPixmap.fromImage(qimage)
-        pix_item = self.graphics_scene.addPixmap(pixmap)
-        pix_item.setAcceptedMouseButtons(Qt.NoButton)
-        pix_item.setZValue(0.5)
-        self.mask_items.append(pix_item)
-
-        # Контуры всех компонент связности
-        contours, _ = cv2.findContours(
-            binary * 255, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-        )
+        path = QPainterPath()
+        path.setFillRule(Qt.OddEvenFill)
         for contour in contours:
-            if len(contour) < 3:
-                continue
-            pts = contour.reshape(-1, 2)
-            q_polygon = QPolygonF(
-                [QPointF(float(x), float(y)) for x, y in pts]
-            )
-            outline_item = self.graphics_scene.addPolygon(
-                q_polygon,
-                QPen(outline_color, 1.5),
-                QBrush(Qt.transparent),
-            )
-            outline_item.setAcceptedMouseButtons(Qt.NoButton)
-            outline_item.setZValue(0.6)
-            self.mask_items.append(outline_item)
+            poly = QPolygonF([QPointF(float(x), float(y)) for x, y in contour])
+            sub = QPainterPath()
+            sub.addPolygon(poly)
+            path.addPath(sub)
+
+        path_item = QGraphicsPathItem(path)
+        path_item.setPen(QPen(outline_color, 1.5))
+        path_item.setBrush(QBrush(fill_color))
+        path_item.setAcceptedMouseButtons(Qt.NoButton)
+        path_item.setZValue(0.5)
+        self.graphics_scene.addItem(path_item)
+        self.mask_items.append(path_item)
 
     def _selection_payload_for_display(
         self,
@@ -2186,6 +2299,14 @@ class ImageEditor(QMainWindow):
             return
 
         image = self.image_storage.images[self._active_image_index]
+        progress = TaskProgressDialog(
+            "Поиск сеянцев",
+            "Анализируем текущую страницу...",
+            maximum=1,
+            parent=self,
+        )
+        progress.cancel_button.setEnabled(False)
+        progress.show()
         results = model.predict(
             image,
             conf_threshold=DETECTION_CONFIDENCE_THRESHOLD,
@@ -2198,6 +2319,12 @@ class ImageEditor(QMainWindow):
             iou_threshold=DETECTION_IOU_THRESHOLD,
             rotate_k=ROTATE_K,
         )
+        progress.set_progress(
+            1,
+            message="Поиск сеянцев завершён.",
+            detail=f"Найдено объектов: {len(objects)}",
+        )
+        progress.close()
         self._refresh_tree()
         self._refresh_statistics_panel()
         self._restore_display(preserve_view=True)
@@ -2217,19 +2344,17 @@ class ImageEditor(QMainWindow):
             return
 
         total = len(self.image_storage.images)
-        progress = QProgressDialog(
-            "Детекция растений на всех страницах...",
-            "Отмена",
-            0,
-            total,
-            self,
+        progress = TaskProgressDialog(
+            "Поиск сеянцев",
+            "Выполняем поиск на всех страницах проекта...",
+            maximum=total,
+            parent=self,
         )
-        progress.setWindowModality(Qt.WindowModal)
         progress.show()
 
         processed = 0
         for page_index, image in enumerate(self.image_storage.images):
-            if progress.wasCanceled():
+            if progress.was_canceled():
                 break
             results = model.predict(
                 image,
@@ -2244,7 +2369,7 @@ class ImageEditor(QMainWindow):
                 rotate_k=ROTATE_K,
             )
             processed += 1
-            progress.setValue(processed)
+            progress.set_progress(processed, detail=f"Страница {page_index + 1} из {total}")
 
         progress.close()
         self._refresh_tree()
@@ -2260,7 +2385,7 @@ class ImageEditor(QMainWindow):
         )
 
     def classify(self) -> None:
-        """Классифицирует части растений внутри найденных объектов проекта."""
+        """Сегментирует части растений внутри найденных объектов проекта."""
         if not self.image_storage.class_object_image or not any(
             self.image_storage.class_object_image
         ):
@@ -2276,14 +2401,12 @@ class ImageEditor(QMainWindow):
         total_objects = sum(
             len(objects) for objects in self.image_storage.class_object_image or []
         )
-        progress = QProgressDialog(
-            "Классификация частей...",
-            "Отмена",
-            0,
-            total_objects,
-            self,
+        progress = TaskProgressDialog(
+            "Сегментация",
+            "Сегментируем части найденных сеянцев...",
+            maximum=total_objects,
+            parent=self,
         )
-        progress.setWindowModality(Qt.WindowModal)
         progress.show()
 
         processed = 0
@@ -2291,7 +2414,7 @@ class ImageEditor(QMainWindow):
             self.image_storage.class_object_image or []
         ):
             for object_index, obj in enumerate(objects):
-                if progress.wasCanceled():
+                if progress.was_canceled():
                     progress.close()
                     self._refresh_tree()
                     self._refresh_statistics_panel()
@@ -2307,7 +2430,7 @@ class ImageEditor(QMainWindow):
                     results,
                 )
                 processed += 1
-                progress.setValue(processed)
+                progress.set_progress(processed, detail=f"Объект {processed} из {total_objects}")
 
         progress.close()
         self._refresh_tree()
@@ -2315,9 +2438,9 @@ class ImageEditor(QMainWindow):
         self._restore_display(preserve_view=True)
         self._log_action(
             "run_analysis",
-            f"Классификация завершена; обработано объектов: {processed}",
+            f"Сегментация завершена; обработано объектов: {processed}",
         )
-        self.statusBar().showMessage("Классификация завершена", 3000)
+        self.statusBar().showMessage("Сегментация завершена", 3000)
 
     def rotate_image(self) -> None:
         """Поворачивает текущую страницу или выбранный кроп и обновляет отображение."""
