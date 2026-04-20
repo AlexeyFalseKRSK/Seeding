@@ -108,6 +108,7 @@ from seeding.ui.bbox_item import BBoxItem
 from seeding.ui.icon_manager import IconManager
 from seeding.ui.statistics_panel import StatisticsPanel
 from seeding.ui.thumbnails_panel import ThumbnailsPanel
+from seeding.ui.detail_panel import SeedlingDetailPanel
 from seeding.ui.tree_widget import LayerTreeWidget
 from seeding.user_service import record_user_action
 from seeding.utils import clip_bbox_to_image, rotate_bbox
@@ -317,6 +318,12 @@ class ImageEditor(QMainWindow):
         self._install_frameless_event_filters()
         self._update_window_control_buttons()
         QShortcut(QKeySequence("M"), self, self.toggle_measure_mode)
+        QShortcut(QKeySequence(Qt.Key_Right), self).activated.connect(
+            lambda: self._navigate_seedling(1)
+        )
+        QShortcut(QKeySequence(Qt.Key_Left), self).activated.connect(
+            lambda: self._navigate_seedling(-1)
+        )
         self.statusBar().showMessage("Откройте изображение или PDF", 3000)
 
     def preload_models(self) -> bool:
@@ -576,6 +583,16 @@ class ImageEditor(QMainWindow):
         self.right_tabs.addTab(self.tree_widget, "Слои")
         self.right_tabs.addTab(self.statistics_panel, "Статистика")
         right_layout.addWidget(self.right_tabs, 1)
+
+        separator = QFrame(right_panel)
+        separator.setFrameShape(QFrame.HLine)
+        separator.setFrameShadow(QFrame.Sunken)
+        right_layout.addWidget(separator)
+
+        self.detail_panel = SeedlingDetailPanel(right_panel)
+        self.detail_panel.navigate.connect(self._navigate_seedling)
+        right_layout.addWidget(self.detail_panel)
+
         splitter.addWidget(right_panel)
         splitter.setSizes(SPLITTER_SIZES)
         self._set_canvas_empty(True)
@@ -1862,6 +1879,7 @@ class ImageEditor(QMainWindow):
         """Переключает отображение по выбору пользователя в дереве слоёв."""
         item = self.tree_widget.currentItem()
         if item is None:
+            self.detail_panel.clear()
             return
         payload = item.data(0, Qt.UserRole) or {}
         item_type = payload.get("type")
@@ -1869,18 +1887,115 @@ class ImageEditor(QMainWindow):
 
         if item_type in {"original", "pdf"}:
             self._select_page(int(payload["index"]))
+            self.detail_panel.clear()
             return
         if item_type == "seeding":
             self.display_image_with_boxes(
                 int(payload["parent_index"]),
                 seeding_idx=int(payload["index"]),
             )
+            self._update_detail_panel(payload)
             return
         if item_type == "class":
             self.display_image_with_boxes(
                 int(payload["parent_index"]),
                 seeding_idx=int(payload["seeding_index"]),
             )
+            self._update_detail_panel(payload)
+
+    def _update_detail_panel(self, payload: dict) -> None:
+        """Заполняет детальную панель данными выбранного объекта."""
+        item_type = payload.get("type")
+        page_idx = int(payload.get("parent_index", 0))
+
+        page_objects = []
+        if (self.image_storage.class_object_image
+                and page_idx < len(self.image_storage.class_object_image)):
+            page_objects = self.image_storage.class_object_image[page_idx]
+
+        if item_type == "seeding":
+            seed_idx = int(payload["index"])
+            if seed_idx >= len(page_objects):
+                self.detail_panel.clear()
+                return
+            obj = page_objects[seed_idx]
+            crop = obj.image[0] if obj.image and isinstance(obj.image[0], np.ndarray) else None
+            self.detail_panel.set_object(
+                name=self._display_part_name(obj.class_name),
+                confidence=obj.confidence,
+                manual=getattr(obj, "manual", False),
+                crop_image=crop,
+                mask_bitmap=None,
+                mask_color=(78, 200, 100),
+                bbox=obj.bbox,
+                pixels_per_mm=self.pixels_per_mm,
+            )
+            return
+
+        if item_type == "class":
+            seed_idx = int(payload["seeding_index"])
+            class_idx = int(payload["class_index"])
+            if seed_idx >= len(page_objects):
+                self.detail_panel.clear()
+                return
+            obj = page_objects[seed_idx]
+            parts = obj.image_all_class or []
+            if class_idx >= len(parts):
+                self.detail_panel.clear()
+                return
+            part = parts[class_idx]
+
+            crop = None
+            if obj.image and isinstance(obj.image[0], np.ndarray) and part.bbox:
+                seed_crop = obj.image[0]
+                x1, y1, x2, y2 = part.bbox
+                sx1, sy1 = (obj.bbox[0], obj.bbox[1]) if obj.bbox else (0, 0)
+                rx1 = max(0, x1 - sx1)
+                ry1 = max(0, y1 - sy1)
+                rx2 = min(seed_crop.shape[1], x2 - sx1)
+                ry2 = min(seed_crop.shape[0], y2 - sy1)
+                if rx2 > rx1 and ry2 > ry1:
+                    crop = seed_crop[ry1:ry2, rx1:rx2]
+
+            fill_color, _ = self._part_mask_colors(part.class_name)
+            mask_color = (fill_color.red(), fill_color.green(), fill_color.blue())
+            fallback_crop = obj.image[0] if obj.image and isinstance(obj.image[0], np.ndarray) else None
+            self.detail_panel.set_object(
+                name=self._display_part_name(part.class_name),
+                confidence=part.confidence,
+                manual=getattr(part, "manual", False),
+                crop_image=crop if (crop is not None and crop.size > 0) else fallback_crop,
+                mask_bitmap=getattr(part, "mask_bitmap", None),
+                mask_color=mask_color,
+                bbox=part.bbox,
+                pixels_per_mm=self.pixels_per_mm,
+            )
+
+    def _navigate_seedling(self, delta: int) -> None:
+        """Переключает выбор на следующий/предыдущий сеянец (delta = +1 или -1)."""
+        item = self.tree_widget.currentItem()
+        if item is None:
+            return
+        payload = item.data(0, Qt.UserRole) or {}
+        item_type = payload.get("type")
+
+        if item_type == "class":
+            item = item.parent()
+            if item is None:
+                return
+            payload = item.data(0, Qt.UserRole) or {}
+
+        if payload.get("type") != "seeding":
+            return
+
+        parent_item = item.parent()
+        if parent_item is None:
+            return
+        current_row = parent_item.indexOfChild(item)
+        new_row = current_row + delta
+        if 0 <= new_row < parent_item.childCount():
+            new_item = parent_item.child(new_row)
+            self.tree_widget.setCurrentItem(new_item)
 
     def display_image(
         self,
