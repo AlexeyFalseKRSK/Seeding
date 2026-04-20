@@ -8,4 +8,6 @@ coverage.xml
 ~$*
 ~WRL*.tmp
 *.bak
+*.bkp
+.claude/
 
