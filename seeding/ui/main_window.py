@@ -44,6 +44,7 @@ from PyQt5.QtWidgets import (
     QGraphicsLineItem,
     QGraphicsPathItem,
     QGraphicsPixmapItem,
+    QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsTextItem,
     QGraphicsView,
@@ -126,6 +127,7 @@ class CanvasGraphicsView(QGraphicsView):
     """Графический viewport с поддержкой прокрутки средней кнопкой мыши."""
 
     box_drawn = pyqtSignal(object)
+    draw_mode_cancelled = pyqtSignal()
 
     def __init__(self, scene: QGraphicsScene, parent=None) -> None:
         """Создаёт viewport и подготавливает поля для ручного перемещения холста."""
@@ -172,7 +174,6 @@ class CanvasGraphicsView(QGraphicsView):
             current = self.mapToScene(event.pos())
             rect = QRectF(self._draw_start_pos, current).normalized()
             if self._rubber_item is None:
-                from PyQt5.QtWidgets import QGraphicsRectItem
                 self._rubber_item = QGraphicsRectItem()
                 pen = QPen(QColor(255, 255, 0), 2, Qt.DashLine)
                 self._rubber_item.setPen(pen)
@@ -213,6 +214,7 @@ class CanvasGraphicsView(QGraphicsView):
     def keyPressEvent(self, event) -> None:
         if self._draw_mode and event.key() == Qt.Key_Escape:
             self.set_draw_mode(False)
+            self.draw_mode_cancelled.emit()
             event.accept()
             return
         super().keyPressEvent(event)
@@ -603,6 +605,9 @@ class ImageEditor(QMainWindow):
         self.graphics_scene = QGraphicsScene(self)
         self.graphics_view = CanvasGraphicsView(self.graphics_scene, self)
         self.graphics_view.box_drawn.connect(self._on_box_drawn)
+        self.graphics_view.draw_mode_cancelled.connect(
+            lambda: self.add_box_mode_button.setChecked(False)
+        )
         self.graphics_view.setObjectName("centralView")
         self.graphics_view.setFrameShape(QFrame.NoFrame)
         self.graphics_view.setRenderHint(QPainter.Antialiasing, True)
@@ -1168,6 +1173,8 @@ class ImageEditor(QMainWindow):
             self.view_mode_button.setChecked(False)
             self.edit_boxes_mode_button.setChecked(False)
             self.edit_masks_mode_button.setChecked(False)
+        else:
+            self.view_mode_button.setChecked(True)
 
     def _on_box_drawn(self, scene_rect) -> None:
         """Обрабатывает нарисованный прямоугольник — показывает диалог выбора класса."""
@@ -1185,7 +1192,10 @@ class ImageEditor(QMainWindow):
             offset_x, offset_y = p.x(), p.y()
 
         page_img = self.image_storage.images[page_idx]
-        img_h, img_w = page_img.shape[:2] if isinstance(page_img, np.ndarray) else (0, 0)
+        if not isinstance(page_img, np.ndarray):
+            logger.warning("_on_box_drawn: page image is not ndarray, skipping")
+            return
+        img_h, img_w = page_img.shape[:2]
 
         x1 = max(0, int(scene_rect.left() - offset_x))
         y1 = max(0, int(scene_rect.top() - offset_y))
@@ -1212,7 +1222,6 @@ class ImageEditor(QMainWindow):
     ) -> None:
         """Создаёт ObjectImage или AllClassImage по нарисованному боксу."""
         from seeding.mask_refiner import refine_mask_bitmap, bitmap_to_polygon
-        from seeding.models import AllClassImage, ObjectImage
 
         page_img = self.image_storage.images[page_idx]
         if not isinstance(page_img, np.ndarray):
@@ -1259,7 +1268,6 @@ class ImageEditor(QMainWindow):
                 target_obj = page_objects[-1]
 
             if target_obj is None:
-                from PyQt5.QtWidgets import QMessageBox
                 QMessageBox.information(
                     self, "Нет сеянца",
                     "Сначала выбери сеянец в дереве, к которому добавить эту часть."
