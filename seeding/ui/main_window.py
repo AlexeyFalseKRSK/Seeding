@@ -1287,7 +1287,7 @@ class ImageEditor(QMainWindow):
                 target_obj.image_all_class = []
             target_obj.image_all_class.append(part)
 
-        self._populate_layer_tree()
+        self._refresh_tree()
         self.display_image_with_boxes(page_idx)
 
     def _build_toolbar(self) -> None:
