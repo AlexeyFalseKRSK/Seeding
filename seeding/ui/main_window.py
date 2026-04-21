@@ -125,15 +125,35 @@ INPUT_FILE_FILTER = (
 class CanvasGraphicsView(QGraphicsView):
     """Графический viewport с поддержкой прокрутки средней кнопкой мыши."""
 
+    box_drawn = pyqtSignal(object)
+
     def __init__(self, scene: QGraphicsScene, parent=None) -> None:
         """Создаёт viewport и подготавливает поля для ручного перемещения холста."""
         super().__init__(scene, parent)
         self._drag_active = False
         self._drag_start_pos = QPoint()
         self._scroll_start_pos = QPoint()
+        self._draw_mode = False
+        self._draw_active = False
+        self._draw_start_pos = QPointF()
+        self._rubber_item = None
+
+    def set_draw_mode(self, enabled: bool) -> None:
+        """Переключает режим рисования боксов."""
+        self._draw_mode = enabled
+        self.setCursor(Qt.CrossCursor if enabled else Qt.ArrowCursor)
+        if not enabled and self._rubber_item is not None:
+            self.scene().removeItem(self._rubber_item)
+            self._rubber_item = None
+        self._draw_active = False
 
     def mousePressEvent(self, event) -> None:
         """Включает режим перетаскивания холста при нажатии средней кнопки мыши."""
+        if self._draw_mode and event.button() == Qt.LeftButton:
+            self._draw_active = True
+            self._draw_start_pos = self.mapToScene(event.pos())
+            event.accept()
+            return
         if event.button() == Qt.MiddleButton:
             self._drag_active = True
             self.setCursor(Qt.ClosedHandCursor)
@@ -148,6 +168,20 @@ class CanvasGraphicsView(QGraphicsView):
 
     def mouseMoveEvent(self, event) -> None:
         """Перемещает холст вслед за курсором, пока активен режим ручной прокрутки."""
+        if self._draw_active:
+            current = self.mapToScene(event.pos())
+            rect = QRectF(self._draw_start_pos, current).normalized()
+            if self._rubber_item is None:
+                from PyQt5.QtWidgets import QGraphicsRectItem
+                self._rubber_item = QGraphicsRectItem()
+                pen = QPen(QColor(255, 255, 0), 2, Qt.DashLine)
+                self._rubber_item.setPen(pen)
+                self._rubber_item.setBrush(Qt.transparent)
+                self._rubber_item.setZValue(10)
+                self.scene().addItem(self._rubber_item)
+            self._rubber_item.setRect(rect)
+            event.accept()
+            return
         if self._drag_active:
             delta = event.pos() - self._drag_start_pos
             self.horizontalScrollBar().setValue(self._scroll_start_pos.x() - delta.x())
@@ -158,12 +192,30 @@ class CanvasGraphicsView(QGraphicsView):
 
     def mouseReleaseEvent(self, event) -> None:
         """Завершает ручное перемещение холста после отпускания средней кнопки."""
+        if self._draw_active and event.button() == Qt.LeftButton:
+            self._draw_active = False
+            current = self.mapToScene(event.pos())
+            rect = QRectF(self._draw_start_pos, current).normalized()
+            if self._rubber_item is not None:
+                self.scene().removeItem(self._rubber_item)
+                self._rubber_item = None
+            if rect.width() > 5 and rect.height() > 5:
+                self.box_drawn.emit(rect)
+            event.accept()
+            return
         if event.button() == Qt.MiddleButton:
             self._drag_active = False
             self.setCursor(Qt.ArrowCursor)
             event.accept()
             return
         super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event) -> None:
+        if self._draw_mode and event.key() == Qt.Key_Escape:
+            self.set_draw_mode(False)
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 class TaskProgressDialog(QDialog):
@@ -491,6 +543,13 @@ class ImageEditor(QMainWindow):
         self.edit_masks_mode_button.setToolTip("Режим будет добавлен позже.")
         mode_bar_layout.addWidget(self.edit_masks_mode_button)
 
+        self.add_box_mode_button = QPushButton("+ Бокс", mode_bar)
+        self.add_box_mode_button.setCheckable(True)
+        self.add_box_mode_button.setProperty("segmented", "true")
+        self.add_box_mode_button.setToolTip("Нарисуй прямоугольник чтобы добавить объект вручную")
+        self.add_box_mode_button.toggled.connect(self._toggle_add_box_mode)
+        mode_bar_layout.addWidget(self.add_box_mode_button)
+
         interaction_layout.addWidget(mode_bar)
         left_layout.addWidget(interaction_card)
         splitter.addWidget(left_panel)
@@ -543,6 +602,7 @@ class ImageEditor(QMainWindow):
 
         self.graphics_scene = QGraphicsScene(self)
         self.graphics_view = CanvasGraphicsView(self.graphics_scene, self)
+        self.graphics_view.box_drawn.connect(self._on_box_drawn)
         self.graphics_view.setObjectName("centralView")
         self.graphics_view.setFrameShape(QFrame.NoFrame)
         self.graphics_view.setRenderHint(QPainter.Antialiasing, True)
@@ -1100,6 +1160,127 @@ class ImageEditor(QMainWindow):
         editable = self._interaction_mode == "edit_boxes"
         for item in self.rect_items:
             item.setEditable(editable)
+
+    def _toggle_add_box_mode(self, enabled: bool) -> None:
+        """Включает/выключает режим рисования боксов на канвасе."""
+        self.graphics_view.set_draw_mode(enabled)
+        if enabled:
+            self.view_mode_button.setChecked(False)
+            self.edit_boxes_mode_button.setChecked(False)
+            self.edit_masks_mode_button.setChecked(False)
+
+    def _on_box_drawn(self, scene_rect) -> None:
+        """Обрабатывает нарисованный прямоугольник — показывает диалог выбора класса."""
+        from seeding.ui.add_box_dialog import AddBoxDialog
+
+        self.add_box_mode_button.setChecked(False)
+
+        page_idx = self._active_image_index
+        if not self.image_storage.images or page_idx >= len(self.image_storage.images):
+            return
+
+        offset_x = offset_y = 0.0
+        if self._pixmap_item is not None:
+            p = self._pixmap_item.pos()
+            offset_x, offset_y = p.x(), p.y()
+
+        page_img = self.image_storage.images[page_idx]
+        img_h, img_w = page_img.shape[:2] if isinstance(page_img, np.ndarray) else (0, 0)
+
+        x1 = max(0, int(scene_rect.left() - offset_x))
+        y1 = max(0, int(scene_rect.top() - offset_y))
+        x2 = min(img_w, int(scene_rect.right() - offset_x))
+        y2 = min(img_h, int(scene_rect.bottom() - offset_y))
+
+        if x2 <= x1 or y2 <= y1:
+            return
+
+        dlg = AddBoxDialog(self)
+        if dlg.exec_() != dlg.Accepted:
+            return
+        class_name = dlg.selected_class()
+        if class_name is None:
+            return
+
+        self._create_manual_object(page_idx, class_name, (x1, y1, x2, y2))
+
+    def _create_manual_object(
+        self,
+        page_idx: int,
+        class_name: str,
+        bbox: tuple[int, int, int, int],
+    ) -> None:
+        """Создаёт ObjectImage или AllClassImage по нарисованному боксу."""
+        from seeding.mask_refiner import refine_mask_bitmap, bitmap_to_polygon
+        from seeding.models import AllClassImage, ObjectImage
+
+        page_img = self.image_storage.images[page_idx]
+        if not isinstance(page_img, np.ndarray):
+            return
+
+        x1, y1, x2, y2 = bbox
+        crop = page_img[y1:y2, x1:x2].copy()
+
+        h, w = crop.shape[:2]
+        coarse = np.full((h, w), 255, dtype=np.uint8)
+        mask_bitmap = refine_mask_bitmap(crop, coarse)
+        mask_polygon = bitmap_to_polygon(mask_bitmap) if mask_bitmap is not None else None
+
+        if class_name == "seeding":
+            obj = ObjectImage(
+                class_name=class_name,
+                confidence=1.0,
+                image=[crop],
+                image_all_class=[],
+                bbox=bbox,
+                manual=True,
+            )
+            if self.image_storage.class_object_image is None:
+                self.image_storage.class_object_image = [
+                    [] for _ in self.image_storage.images
+                ]
+            while len(self.image_storage.class_object_image) <= page_idx:
+                self.image_storage.class_object_image.append([])
+            self.image_storage.class_object_image[page_idx].append(obj)
+        else:
+            page_objects = []
+            if (self.image_storage.class_object_image
+                    and page_idx < len(self.image_storage.class_object_image)):
+                page_objects = self.image_storage.class_object_image[page_idx]
+
+            target_obj = None
+            selected = self.app_state.selected_item or {}
+            if selected.get("type") in {"seeding", "class"}:
+                seed_idx = int(selected.get("seeding_index", selected.get("index", 0)))
+                if seed_idx < len(page_objects):
+                    target_obj = page_objects[seed_idx]
+
+            if target_obj is None and page_objects:
+                target_obj = page_objects[-1]
+
+            if target_obj is None:
+                from PyQt5.QtWidgets import QMessageBox
+                QMessageBox.information(
+                    self, "Нет сеянца",
+                    "Сначала выбери сеянец в дереве, к которому добавить эту часть."
+                )
+                return
+
+            part = AllClassImage(
+                class_name=class_name,
+                confidence=1.0,
+                image=crop,
+                bbox=bbox,
+                mask_polygon=mask_polygon,
+                mask_bitmap=mask_bitmap,
+                manual=True,
+            )
+            if target_obj.image_all_class is None:
+                target_obj.image_all_class = []
+            target_obj.image_all_class.append(part)
+
+        self._populate_layer_tree()
+        self.display_image_with_boxes(page_idx)
 
     def _build_toolbar(self) -> None:
         """Создаёт верхний toolbar с основными действиями приложения."""
