@@ -11,3 +11,13 @@ coverage.xml
 *.bkp
 .claude/
 
+# Local data, trained weights, and generated experiment outputs.
+# Keep them on disk, but do not put them in normal git commits.
+dataset/
+Photo/
+results/
+runs/
+models/
+*.pt
+*.rar
+
