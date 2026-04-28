@@ -19,6 +19,7 @@ from PyQt5.QtCore import (
     QRectF,
     QSettings,
     QSize,
+    QThread,
     Qt,
     pyqtSignal,
 )
@@ -35,6 +36,8 @@ from PyQt5.QtGui import (
 )
 from PyQt5.QtWidgets import (
     QAction,
+    QApplication,
+    QDialog,
     QFrame,
     QFileDialog,
     QGraphicsItem,
@@ -46,19 +49,18 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
     QLabel,
-    QListWidget,
-    QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
-    QProgressDialog,
+    QProgressBar,
     QShortcut,
     QSizePolicy,
     QSplitter,
     QStackedLayout,
     QStyle,
-    QTabWidget,
     QToolBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -71,8 +73,6 @@ from seeding.config import (
     DETECTION_CONFIDENCE_THRESHOLD,
     DETECTION_IOU_THRESHOLD,
     DEFAULT_CLASSIFY_WEIGHTS_PATH,
-    PANEL_LAYERS_MAX_WIDTH,
-    PANEL_LAYERS_MIN_WIDTH,
     PDF_RENDER_SCALE_DEFAULT,
     QSETTINGS_APP,
     QSETTINGS_ORG,
@@ -95,6 +95,7 @@ from seeding.models import (
 )
 from seeding.services import (
     generate_report,
+    orient_crop_upright,
     rotate_selection,
     run_classification_for_selection,
     run_detection,
@@ -102,7 +103,6 @@ from seeding.services import (
 from seeding.ui.bbox_item import BBoxItem
 from seeding.ui.icon_manager import IconManager
 from seeding.ui.statistics_panel import StatisticsPanel
-from seeding.ui.thumbnails_panel import ThumbnailsPanel
 from seeding.ui.tree_widget import LayerTreeWidget
 from seeding.user_service import record_user_action
 from seeding.utils import clip_bbox_to_image, rotate_bbox
@@ -114,6 +114,88 @@ INPUT_FILE_FILTER = (
     "PDF Files (*.pdf);;"
     "All Files (*)"
 )
+
+
+class ModelLoaderThread(QThread):
+    """Фоновый поток для предзагрузки моделей детекции и сегментации."""
+
+    finished = pyqtSignal(object, object)
+    error = pyqtSignal(str)
+
+    def __init__(self, detect_path: str, classify_path: str, parent=None) -> None:
+        super().__init__(parent)
+        self._detect_path = detect_path
+        self._classify_path = classify_path
+
+    def run(self) -> None:
+        try:
+            detect = load_inference_backend(self._detect_path)
+            classify = load_inference_backend(self._classify_path)
+            self.finished.emit(detect, classify)
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
+class AnalysisProgressDialog(QDialog):
+    """Стилизованный диалог прогресса анализа в тёмной теме приложения."""
+
+    canceled = pyqtSignal()
+
+    def __init__(self, title: str, parent=None) -> None:
+        super().__init__(parent, Qt.Dialog | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground, False)
+        self.setModal(True)
+        self.setFixedWidth(420)
+
+        self._canceled = False
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(14)
+
+        self._title_label = QLabel(title)
+        self._title_label.setProperty("progressTitle", "true")
+        font = self._title_label.font()
+        font.setPointSize(font.pointSize() + 1)
+        font.setBold(True)
+        self._title_label.setFont(font)
+        layout.addWidget(self._title_label)
+
+        self._step_label = QLabel("")
+        self._step_label.setObjectName("progressStepLabel")
+        layout.addWidget(self._step_label)
+
+        self._bar = QProgressBar()
+        self._bar.setFixedHeight(18)
+        self._bar.setTextVisible(True)
+        self._bar.setFormat("%v / %m")
+        layout.addWidget(self._bar)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        self._cancel_btn = QPushButton("Отмена")
+        self._cancel_btn.setFixedWidth(100)
+        self._cancel_btn.clicked.connect(self._on_cancel)
+        btn_row.addWidget(self._cancel_btn)
+        layout.addLayout(btn_row)
+
+    def _on_cancel(self) -> None:
+        self._canceled = True
+        self.canceled.emit()
+
+    def wasCanceled(self) -> bool:
+        return self._canceled
+
+    def setRange(self, minimum: int, maximum: int) -> None:
+        self._bar.setRange(minimum, maximum)
+
+    def setValue(self, value: int) -> None:
+        self._bar.setValue(value)
+        QApplication.processEvents()
+
+    def setStep(self, text: str) -> None:
+        self._step_label.setText(text)
+        QApplication.processEvents()
 
 
 class CanvasGraphicsView(QGraphicsView):
@@ -223,6 +305,25 @@ class ImageEditor(QMainWindow):
         QShortcut(QKeySequence("M"), self, self.toggle_measure_mode)
         self.statusBar().showMessage("Откройте изображение или PDF", 3000)
 
+    def preload_models(self) -> None:
+        """Запускает фоновую загрузку обеих моделей сразу после показа окна."""
+        self._model_loader = ModelLoaderThread(
+            self.weights_path, self.classify_weights_path, self
+        )
+        self._model_loader.finished.connect(self._on_models_loaded)
+        self._model_loader.error.connect(self._on_models_load_error)
+        self.statusBar().showMessage("Загрузка моделей…")
+        self._model_loader.start()
+
+    def _on_models_loaded(self, detect_model, classify_model) -> None:
+        self.detect_model = detect_model
+        self.classify_model = classify_model
+        self.statusBar().showMessage("Модели загружены", 3000)
+
+    def _on_models_load_error(self, error_text: str) -> None:
+        self.statusBar().showMessage("Ошибка загрузки моделей", 5000)
+        logger.error("Не удалось предзагрузить модели: %s", error_text)
+
     def _log_action(self, action: str, details: str | None = None) -> None:
         """Сохраняет действие пользователя, не прерывая UI при ошибках логирования."""
 
@@ -268,13 +369,15 @@ class ImageEditor(QMainWindow):
         self.project_count_chip.setObjectName("metricChip")
         left_layout.addWidget(self.project_count_chip, alignment=Qt.AlignLeft)
 
-        self.project_files_list = QListWidget(left_panel)
-        self.project_files_list.setObjectName("projectFilesList")
-        self.project_files_list.setMinimumHeight(240)
-        self.project_files_list.currentRowChanged.connect(
-            self._on_project_row_changed
+        self.tree_widget = LayerTreeWidget()
+        self.tree_widget.itemSelectionChanged.connect(
+            self._on_tree_selection_changed
         )
-        left_layout.addWidget(self.project_files_list, 1)
+        left_layout.addWidget(self.tree_widget, 1)
+
+        self.statistics_panel = StatisticsPanel(self)
+        self.statistics_panel.setMaximumHeight(180)
+        left_layout.addWidget(self.statistics_panel)
 
         interaction_card = QFrame(left_panel)
         interaction_card.setObjectName("imageInteractionCard")
@@ -419,35 +522,7 @@ class ImageEditor(QMainWindow):
         canvas_layout.addLayout(self.canvas_stack, 1)
         splitter.addWidget(self.canvas_host)
 
-        right_panel = QFrame(self)
-        right_panel.setObjectName("panelCard")
-        right_panel.setMinimumWidth(PANEL_LAYERS_MIN_WIDTH)
-        right_panel.setMaximumWidth(PANEL_LAYERS_MAX_WIDTH)
-        right_layout = QVBoxLayout(right_panel)
-        right_layout.setContentsMargins(14, 14, 14, 14)
-        right_layout.setSpacing(10)
-
-        self.sidebar_page_label = QLabel("Нет выбранной страницы", right_panel)
-        self.sidebar_page_label.setObjectName("panelSubTitle")
-        self.sidebar_page_label.setWordWrap(True)
-        right_layout.addWidget(self.sidebar_page_label)
-
-        self.right_tabs = QTabWidget(right_panel)
-        self.right_tabs.setObjectName("rightTabs")
-        self.right_tabs.setDocumentMode(True)
-        self.tree_widget = LayerTreeWidget()
-        self.tree_widget.itemSelectionChanged.connect(
-            self._on_tree_selection_changed
-        )
-        self.statistics_panel = StatisticsPanel(self)
-        self.thumbnails_panel = ThumbnailsPanel(self)
-        self.thumbnails_panel.image_selected.connect(self._select_page)
-
-        self.right_tabs.addTab(self.tree_widget, "Слои")
-        self.right_tabs.addTab(self.statistics_panel, "Статистика")
-        right_layout.addWidget(self.right_tabs, 1)
-        splitter.addWidget(right_panel)
-        splitter.setSizes(SPLITTER_SIZES)
+        splitter.setSizes([SPLITTER_SIZES[0], SPLITTER_SIZES[1] + SPLITTER_SIZES[2]])
         self._set_canvas_empty(True)
         self._update_canvas_status()
 
@@ -524,7 +599,6 @@ class ImageEditor(QMainWindow):
         """Обновляет подписи текущей страницы, масштаба и калибровки на панели статуса."""
         if not self.image_storage.images:
             self.canvas_page_label.setText("Нет открытого изображения")
-            self.sidebar_page_label.setText("Нет выбранной страницы")
             self.zoom_status_chip.setText("100%")
             self.scale_status_chip.setText("px")
             return
@@ -538,7 +612,6 @@ class ImageEditor(QMainWindow):
             page_text = source_name
 
         self.canvas_page_label.setText(page_text)
-        self.sidebar_page_label.setText(page_text)
         self.zoom_status_chip.setText(f"{int(round(self.zoom_factor * 100))}%")
         if self.pixels_per_mm > 0:
             self.scale_status_chip.setText(f"{self.pixels_per_mm:.2f} px/мм")
@@ -985,18 +1058,24 @@ class ImageEditor(QMainWindow):
             shortcut="Ctrl+F",
             fallback_standard_icon=QStyle.SP_MediaPlay,
         )
-        self.action_find_all = self._create_action(
+        self.btn_find_all = self._create_split_button(
             "action_detect_all.svg",
             "Найти на всех",
-            self.find_all_seedlings,
-            shortcut="Ctrl+Shift+F",
+            self.find_all_seedlings_new_only,
+            [
+                ("Найти только на новых страницах", self.find_all_seedlings_new_only),
+                ("Найти на всех страницах заново", self.find_all_seedlings),
+            ],
             fallback_standard_icon=QStyle.SP_BrowserReload,
         )
-        self.action_classify = self._create_action(
+        self.btn_classify = self._create_split_button(
             "action_classify.svg",
-            "Классифицировать",
-            self.classify,
-            shortcut="Ctrl+C",
+            "Сегментировать",
+            self.classify_new_only,
+            [
+                ("Сегментировать только новые", self.classify_new_only),
+                ("Сегментировать все заново", self.classify),
+            ],
             fallback_standard_icon=QStyle.SP_FileDialogDetailedView,
         )
         self.action_rotate = self._create_action(
@@ -1045,8 +1124,8 @@ class ImageEditor(QMainWindow):
         toolbar.addAction(self.action_add)
         toolbar.addSeparator()
         toolbar.addAction(self.action_find)
-        toolbar.addAction(self.action_find_all)
-        toolbar.addAction(self.action_classify)
+        toolbar.addWidget(self.btn_find_all)
+        toolbar.addWidget(self.btn_classify)
         toolbar.addAction(self.action_rotate)
         toolbar.addSeparator()
         toolbar.addAction(self.action_report)
@@ -1079,8 +1158,12 @@ class ImageEditor(QMainWindow):
 
         analysis_menu = self.menuBar().addMenu("Анализ")
         analysis_menu.addAction(self.action_find)
-        analysis_menu.addAction(self.action_find_all)
-        analysis_menu.addAction(self.action_classify)
+        find_all_menu = analysis_menu.addMenu("Найти на всех")
+        find_all_menu.addAction("Найти только на новых страницах", self.find_all_seedlings_new_only)
+        find_all_menu.addAction("Найти на всех страницах заново", self.find_all_seedlings)
+        classify_menu = analysis_menu.addMenu("Сегментировать")
+        classify_menu.addAction("Сегментировать только новые", self.classify_new_only)
+        classify_menu.addAction("Сегментировать все заново", self.classify)
         analysis_menu.addAction(self.action_rotate)
 
         view_menu = self.menuBar().addMenu("Вид")
@@ -1138,6 +1221,34 @@ class ImageEditor(QMainWindow):
             action.setShortcut(shortcut)
         action.triggered.connect(handler)
         return action
+
+    def _create_split_button(
+        self,
+        icon_name: str,
+        text: str,
+        default_handler,
+        menu_items: list[tuple[str, object]],
+        *,
+        fallback_standard_icon: QStyle.StandardPixmap | None = None,
+    ) -> QToolButton:
+        """Создаёт кнопку со стрелкой: клик = default_handler, стрелка = меню вариантов."""
+        btn = QToolButton(self.main_toolbar)
+        btn.setIcon(
+            self.icon_manager.get_icon(
+                icon_name, fallback_standard_icon=fallback_standard_icon
+            )
+        )
+        btn.setText(text)
+        btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        btn.setPopupMode(QToolButton.MenuButtonPopup)
+
+        menu = QMenu(btn)
+        for item_text, handler in menu_items:
+            action = menu.addAction(item_text)
+            action.triggered.connect(handler)
+        btn.setMenu(menu)
+        btn.clicked.connect(default_handler)
+        return btn
 
     def _create_window_control_button(
         self,
@@ -1451,9 +1562,7 @@ class ImageEditor(QMainWindow):
         self.zoom_factor = 1.0
         self.min_fit_zoom = 1.0
         self.app_state.zoom_factor = self.zoom_factor
-        self.project_files_list.clear()
         self.tree_widget.clear()
-        self.thumbnails_panel.set_images([])
         self.statistics_panel.set_summary(
             StatisticsPanel.build_summary(self.image_storage)
         )
@@ -1514,7 +1623,6 @@ class ImageEditor(QMainWindow):
             self._select_page(first_new_index)
         self._refresh_tree()
         self._refresh_statistics_panel()
-        self._refresh_thumbnails_panel()
 
     def _load_path(self, file_path: str) -> list[int]:
         """Выбирает способ загрузки файла по его расширению."""
@@ -1543,19 +1651,14 @@ class ImageEditor(QMainWindow):
         try:
             doc = fitz.open(pdf_path)
             total = int(doc.page_count)
-            progress = QProgressDialog(
-                "Загрузка PDF...",
-                "Отмена",
-                0,
-                total,
-                self,
-            )
-            progress.setWindowModality(Qt.WindowModal)
+            progress = AnalysisProgressDialog("Загрузка PDF", self)
+            progress.setRange(0, total)
             progress.show()
 
             for page_num in range(total):
                 if progress.wasCanceled():
                     break
+                progress.setStep(f"Страница {page_num + 1} из {total}…")
                 page = doc.load_page(page_num)
                 pix = page.get_pixmap(
                     matrix=fitz.Matrix(
@@ -1601,9 +1704,6 @@ class ImageEditor(QMainWindow):
         ):
             self.image_storage.class_object_image.append([])
 
-        item = QListWidgetItem(self._page_title(index))
-        item.setData(Qt.UserRole, index)
-        self.project_files_list.addItem(item)
         self._update_project_summary()
         return index
 
@@ -1622,45 +1722,34 @@ class ImageEditor(QMainWindow):
             return self.image_storage.source_files[page_index]
         return self.image_storage.file_path
 
-    def _on_project_row_changed(self, row: int) -> None:
-        """Реагирует на смену выбранной строки в списке страниц проекта."""
-        if row < 0 or row >= len(self.image_storage.images):
-            return
-        self._select_page(row)
-
     def _select_page(self, page_index: int) -> None:
         """Делает страницу активной и обновляет связанные элементы интерфейса."""
         if page_index < 0 or page_index >= len(self.image_storage.images):
             return
         self._restore_calibration_for_index(page_index)
         self.display_image_with_boxes(page_index)
-        if self.project_files_list.currentRow() != page_index:
-            self.project_files_list.blockSignals(True)
-            self.project_files_list.setCurrentRow(page_index)
-            self.project_files_list.blockSignals(False)
-        self.thumbnails_panel.set_active_index(page_index)
-        self._refresh_tree()
+        self._sync_tree_to_active_page()
         self._refresh_statistics_panel()
         self._update_canvas_status()
 
     def _refresh_tree(self) -> None:
-        """Перестраивает дерево слоёв для активной страницы проекта."""
+        """Перестраивает дерево проекта: все страницы, сеянцы и части."""
         self.tree_widget.blockSignals(True)
         self.tree_widget.clear()
 
-        if self.image_storage.images:
-            page_index = min(
-                max(self._active_image_index, 0),
-                len(self.image_storage.images) - 1,
-            )
-            image = self.image_storage.images[page_index]
+        active = min(
+            max(self._active_image_index, 0),
+            max(len(self.image_storage.images) - 1, 0),
+        )
+
+        for page_index, image in enumerate(self.image_storage.images):
+            source = self._source_file(page_index)
+            image_type = "pdf" if source.lower().endswith(".pdf") else "original"
             root = self.tree_widget.add_root_item(
                 name=self._page_title(page_index),
-                description=Path(self._source_file(page_index)).name,
+                description=Path(source).name,
                 index=page_index,
-                image_type="pdf"
-                if self._source_file(page_index).lower().endswith(".pdf")
-                else "original",
+                image_type=image_type,
                 image=image,
             )
             page_objects = []
@@ -1679,6 +1768,11 @@ class ImageEditor(QMainWindow):
                     obj.image[0] if obj.image else None,
                     confidence=obj.confidence,
                 )
+                if getattr(obj, "orientation_uncertain", False):
+                    child.setIcon(
+                        0,
+                        self.style().standardIcon(QStyle.SP_MessageBoxWarning),
+                    )
                 for class_index, part in enumerate(obj.image_all_class or []):
                     self.tree_widget.add_class_item(
                         child,
@@ -1690,8 +1784,20 @@ class ImageEditor(QMainWindow):
                         confidence=part.confidence,
                     )
                 child.setExpanded(False)
-            root.setExpanded(False)
+            root.setExpanded(page_index == active)
 
+        self.tree_widget.blockSignals(False)
+        self._sync_tree_to_active_page()
+
+    def _sync_tree_to_active_page(self) -> None:
+        """Выделяет в дереве узел активной страницы без триггера сигналов."""
+        self.tree_widget.blockSignals(True)
+        for i in range(self.tree_widget.topLevelItemCount()):
+            item = self.tree_widget.topLevelItem(i)
+            payload = item.data(0, Qt.UserRole) or {}
+            if payload.get("index") == self._active_image_index:
+                self.tree_widget.setCurrentItem(item)
+                break
         self.tree_widget.blockSignals(False)
 
     def _refresh_statistics_panel(self) -> None:
@@ -1716,16 +1822,6 @@ class ImageEditor(QMainWindow):
             )
             summary = StatisticsPanel.build_summary(page_data)
         self.statistics_panel.set_summary(summary)
-
-    def _refresh_thumbnails_panel(self) -> None:
-        """Перестраивает панель миниатюр и выделяет активную страницу."""
-        images = [
-            image
-            for image in self.image_storage.images
-            if isinstance(image, np.ndarray)
-        ]
-        self.thumbnails_panel.set_images(images)
-        self.thumbnails_panel.set_active_index(self._active_image_index)
 
     def _on_tree_selection_changed(self) -> None:
         """Переключает отображение по выбору пользователя в дереве слоёв."""
@@ -1920,11 +2016,11 @@ class ImageEditor(QMainWindow):
     def _part_mask_colors(self, class_name: str | None) -> tuple[QColor, QColor]:
         """Возвращает цвета заливки и контура маски по типу части растения."""
         value = (class_name or "").strip().lower()
-        if value == "root":
+        if value.startswith("root"):
             return QColor(52, 199, 89, 80), QColor(52, 199, 89, 210)
-        if value == "stem":
+        if value.startswith("stem"):
             return QColor(255, 159, 10, 80), QColor(255, 159, 10, 210)
-        if value in {"flower", "inflorescence"}:
+        if value.startswith("flower") or value == "inflorescence":
             return QColor(64, 156, 255, 80), QColor(64, 156, 255, 210)
         return QColor(46, 226, 201, 70), QColor(46, 226, 201, 190)
 
@@ -2137,7 +2233,6 @@ class ImageEditor(QMainWindow):
                 self.rect_items.append(item)
 
         self._apply_interaction_mode_to_rect_items()
-        self.thumbnails_panel.set_active_index(img_idx)
         self._update_canvas_status()
 
     def _seedling_title(self, object_index: int, obj: ObjectImage) -> str:
@@ -2217,20 +2312,15 @@ class ImageEditor(QMainWindow):
             return
 
         total = len(self.image_storage.images)
-        progress = QProgressDialog(
-            "Детекция растений на всех страницах...",
-            "Отмена",
-            0,
-            total,
-            self,
-        )
-        progress.setWindowModality(Qt.WindowModal)
+        progress = AnalysisProgressDialog("Поиск сеянцев", self)
+        progress.setRange(0, total)
         progress.show()
 
         processed = 0
         for page_index, image in enumerate(self.image_storage.images):
             if progress.wasCanceled():
                 break
+            progress.setStep(f"Страница {page_index + 1} из {total}…")
             results = model.predict(
                 image,
                 conf_threshold=DETECTION_CONFIDENCE_THRESHOLD,
@@ -2259,6 +2349,65 @@ class ImageEditor(QMainWindow):
             3000,
         )
 
+    def find_all_seedlings_new_only(self) -> None:
+        """Выполняет детекцию только на страницах без существующих результатов."""
+        if not self.image_storage.images:
+            self._show_info("Нет данных", "Сначала откройте изображение или PDF.")
+            return
+        model = self._ensure_detect_model()
+        if model is None:
+            return
+
+        pages_to_process = [
+            page_index
+            for page_index, image in enumerate(self.image_storage.images)
+            if not (
+                self.image_storage.class_object_image
+                and page_index < len(self.image_storage.class_object_image)
+                and self.image_storage.class_object_image[page_index]
+            )
+        ]
+        if not pages_to_process:
+            self.statusBar().showMessage("Все страницы уже обработаны", 3000)
+            return
+
+        total = len(pages_to_process)
+        progress = AnalysisProgressDialog("Поиск сеянцев (новые)", self)
+        progress.setRange(0, total)
+        progress.show()
+
+        processed = 0
+        for step, page_index in enumerate(pages_to_process):
+            if progress.wasCanceled():
+                break
+            progress.setStep(f"Страница {page_index + 1}… ({step + 1}/{total})")
+            results = model.predict(
+                self.image_storage.images[page_index],
+                conf_threshold=DETECTION_CONFIDENCE_THRESHOLD,
+            )
+            run_detection(
+                self.app_state,
+                page_index,
+                results,
+                detection_class_names=DETECTION_CLASS_NAMES,
+                iou_threshold=DETECTION_IOU_THRESHOLD,
+                rotate_k=ROTATE_K,
+            )
+            processed += 1
+            progress.setValue(processed)
+
+        progress.close()
+        self._refresh_tree()
+        self._refresh_statistics_panel()
+        self._restore_display(preserve_view=True)
+        self._log_action(
+            "run_analysis",
+            f"Детекция (новые страницы) завершена; обработано: {processed}/{total}",
+        )
+        self.statusBar().showMessage(
+            f"Поиск завершён: обработано {processed} новых страниц", 3000
+        )
+
     def classify(self) -> None:
         """Классифицирует части растений внутри найденных объектов проекта."""
         if not self.image_storage.class_object_image or not any(
@@ -2276,14 +2425,8 @@ class ImageEditor(QMainWindow):
         total_objects = sum(
             len(objects) for objects in self.image_storage.class_object_image or []
         )
-        progress = QProgressDialog(
-            "Классификация частей...",
-            "Отмена",
-            0,
-            total_objects,
-            self,
-        )
-        progress.setWindowModality(Qt.WindowModal)
+        progress = AnalysisProgressDialog("Сегментация частей", self)
+        progress.setRange(0, total_objects)
         progress.show()
 
         processed = 0
@@ -2299,7 +2442,18 @@ class ImageEditor(QMainWindow):
                     return
                 if not obj.image:
                     continue
-                results = model.predict(obj.image[0])
+                progress.setStep(f"Сеянец {processed + 1} из {total_objects}…")
+                # Прогон 1: определяем ориентацию
+                orient_results = model.predict(obj.image[0])
+                oriented_crop, was_rotated, uncertain = orient_crop_upright(
+                    obj.image[0], orient_results, predict_fn=model.predict
+                )
+                if was_rotated:
+                    obj.image[0] = oriented_crop
+                    obj.rotation_k = (obj.rotation_k + 2) % 4
+                obj.orientation_uncertain = uncertain
+                # Прогон 2: финальная сегментация на правильно ориентированном кропе
+                results = model.predict(obj.image[0]) if was_rotated else orient_results
                 run_classification_for_selection(
                     self.app_state,
                     page_index,
@@ -2315,9 +2469,79 @@ class ImageEditor(QMainWindow):
         self._restore_display(preserve_view=True)
         self._log_action(
             "run_analysis",
-            f"Классификация завершена; обработано объектов: {processed}",
+            f"Сегментация завершена; обработано объектов: {processed}",
         )
-        self.statusBar().showMessage("Классификация завершена", 3000)
+        self.statusBar().showMessage("Сегментация завершена", 3000)
+
+    def classify_new_only(self) -> None:
+        """Сегментирует только сеянцы без существующих результатов сегментации."""
+        if not self.image_storage.class_object_image or not any(
+            self.image_storage.class_object_image
+        ):
+            self._show_info(
+                "Нет детекций",
+                "Сначала выполните детекцию растений.",
+            )
+            return
+        model = self._ensure_classify_model()
+        if model is None:
+            return
+
+        pending = [
+            (page_index, object_index, obj)
+            for page_index, objects in enumerate(
+                self.image_storage.class_object_image or []
+            )
+            for object_index, obj in enumerate(objects)
+            if obj.image and not obj.image_all_class
+        ]
+        if not pending:
+            self.statusBar().showMessage("Все сеянцы уже сегментированы", 3000)
+            return
+
+        total = len(pending)
+        progress = AnalysisProgressDialog("Сегментация (новые)", self)
+        progress.setRange(0, total)
+        progress.show()
+
+        processed = 0
+        for page_index, object_index, obj in pending:
+            if progress.wasCanceled():
+                progress.close()
+                self._refresh_tree()
+                self._refresh_statistics_panel()
+                self._restore_display(preserve_view=True)
+                return
+            progress.setStep(f"Сеянец {processed + 1} из {total}…")
+            orient_results = model.predict(obj.image[0])
+            oriented_crop, was_rotated, uncertain = orient_crop_upright(
+                obj.image[0], orient_results, predict_fn=model.predict
+            )
+            if was_rotated:
+                obj.image[0] = oriented_crop
+                obj.rotation_k = (obj.rotation_k + 2) % 4
+            obj.orientation_uncertain = uncertain
+            results = model.predict(obj.image[0]) if was_rotated else orient_results
+            run_classification_for_selection(
+                self.app_state,
+                page_index,
+                object_index,
+                results,
+            )
+            processed += 1
+            progress.setValue(processed)
+
+        progress.close()
+        self._refresh_tree()
+        self._refresh_statistics_panel()
+        self._restore_display(preserve_view=True)
+        self._log_action(
+            "run_analysis",
+            f"Сегментация (новые) завершена; обработано: {processed}/{total}",
+        )
+        self.statusBar().showMessage(
+            f"Сегментация завершена: обработано {processed} новых сеянцев", 3000
+        )
 
     def rotate_image(self) -> None:
         """Поворачивает текущую страницу или выбранный кроп и обновляет отображение."""
@@ -2345,7 +2569,6 @@ class ImageEditor(QMainWindow):
 
         self._refresh_tree()
         self._refresh_statistics_panel()
-        self._refresh_thumbnails_panel()
         if result.target == "crop" and result.crop_index is not None:
             self.display_image_with_boxes(result.page_index, result.crop_index)
         else:

@@ -442,6 +442,80 @@ def run_classification_for_selection(
     return parts
 
 
+_ROOT_CLASSES = {"root", "rootcedr", "rootpinus"}
+_TOP_CLASSES = {"flower", "inflorescence", "flowercedr", "flowerpinus"}
+
+
+def _results_box_count(results) -> int:
+    """Количество найденных bbox в результатах модели."""
+    count = 0
+    for result in results:
+        boxes = result.boxes
+        if boxes is None or isinstance(boxes, list):
+            continue
+        count += len(boxes)
+    return count
+
+
+def orient_crop_upright(
+    crop: np.ndarray,
+    first_pass_results,
+    *,
+    predict_fn=None,
+) -> tuple[np.ndarray, bool, bool]:
+    """Определяет ориентацию кропа по первому прогону сегментации.
+
+    Возвращает (ориентированный кроп, был ли применён поворот 180°, неопределённость).
+    Неопределённость = True когда найден только один из двух маркеров или ни одного.
+    Логика (от точного к запасному):
+      1. Найдены оба класса — ориентируем по взаимному расположению (уверенно).
+      2. Найден только один класс — ориентируем по нему, но помечаем как uncertain.
+      3. Ничего не найдено — пробуем 180° и берём тот вариант, где есть хоть что-то,
+         помечаем как uncertain.
+    """
+    if not first_pass_results:
+        return crop, False, True
+
+    root_ys: list[float] = []
+    top_ys: list[float] = []
+
+    for result in first_pass_results:
+        for box in result.boxes:
+            class_name = str(result.names[int(box.cls)]).lower()
+            coords = box.xyxy[0].cpu().numpy()
+            center_y = (float(coords[1]) + float(coords[3])) / 2.0
+            if class_name in _ROOT_CLASSES:
+                root_ys.append(center_y)
+            elif class_name in _TOP_CLASSES:
+                top_ys.append(center_y)
+
+    crop_height = float(crop.shape[0])
+    mid_y = crop_height / 2.0
+
+    if root_ys or top_ys:
+        both_found = bool(root_ys and top_ys)
+        uncertain = not both_found
+        if both_found:
+            if sum(root_ys) / len(root_ys) < sum(top_ys) / len(top_ys):
+                return np.rot90(crop, k=2), True, uncertain
+        elif root_ys:
+            if sum(root_ys) / len(root_ys) < mid_y:
+                return np.rot90(crop, k=2), True, uncertain
+        elif top_ys:
+            if sum(top_ys) / len(top_ys) > mid_y:
+                return np.rot90(crop, k=2), True, uncertain
+        return crop, False, uncertain
+
+    # Ничего не найдено — пробуем 180° и берём тот вариант, где есть хоть что-то
+    if predict_fn is not None:
+        rotated_crop = np.rot90(crop, k=2)
+        rotated_results = predict_fn(rotated_crop)
+        if _results_box_count(rotated_results) > 0:
+            return rotated_crop, True, True
+
+    return crop, False, True
+
+
 def generate_report(state: AppState, output_path: str) -> str:
     """Создает PDF-отчет и сохраняет путь в состоянии приложения."""
     create_pdf_report(state.image_storage, output_path)
@@ -452,6 +526,7 @@ def generate_report(state: AppState, output_path: str) -> str:
 __all__ = [
     "build_classified_parts",
     "build_detected_objects",
+    "orient_crop_upright",
     "generate_report",
     "refresh_page_crops",
     "rotate_crop",

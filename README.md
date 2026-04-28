@@ -44,7 +44,7 @@
 - Входные форматы: `png`, `jpg`, `jpeg`, `bmp`, `tiff`, `pdf`
 - Детекция сеянцев на текущем изображении или на всех страницах PDF
 - Классификация частей найденных объектов (корень, стебель, соцветие и др.)
-- Отображение результатов в дереве слоёв, панели миниатюр и панели статистики
+- Отображение результатов в дереве слоёв и панели статистики
 - Интерактивное редактирование ограничивающих рамок и масок на холсте
 - Поворот изображений и кропов с пересчётом координат и масок
 - Калибровка масштаба (пикселей/мм) с визуальным инструментом измерения
@@ -123,7 +123,7 @@ seeding
 | Параметр | Аргумент CLI | Переменная окружения | Значение по умолчанию |
 |---|---|---|---|
 | Модель детекции | `--weights` | `YOLO_WEIGHTS_PATH` | `models/bestDetectNew.pt` |
-| Модель классификации | `--classify-weights` | `YOLO_CLASSIFY_WEIGHTS_PATH` | `models/bestKlassSeg.pt` |
+| Модель классификации | `--classify-weights` | `YOLO_CLASSIFY_WEIGHTS_PATH` | `models/bestKlassSegFlip180.pt` |
 | Путь к базе данных | — | `SEEDING_DB_PATH` | `seeding/data/seeding.sqlite3` |
 
 ### Примеры запуска
@@ -133,7 +133,7 @@ seeding
 seeding
 
 # С явным указанием моделей
-seeding --weights models/bestDetectNew.pt --classify-weights models/bestKlassSeg.pt
+seeding --weights models/bestDetectNew.pt --classify-weights models/bestKlassSegFlip180.pt
 
 # Через переменные окружения
 YOLO_WEIGHTS_PATH=models/bestDetectNew.pt seeding
@@ -258,7 +258,6 @@ Seeding/
 │   │   ├── main_window.py  # Главное окно приложения
 │   │   ├── login_dialog.py # Диалог авторизации
 │   │   ├── tree_widget.py  # Дерево слоёв
-│   │   ├── thumbnails_panel.py  # Панель миниатюр
 │   │   ├── statistics_panel.py  # Панель статистики
 │   │   ├── bbox_item.py    # Интерактивные рамки на холсте
 │   │   ├── styles.py       # Загрузчик стилей

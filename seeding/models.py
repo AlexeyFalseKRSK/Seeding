@@ -39,6 +39,7 @@ class ObjectImage:
     image_all_class: list[AllClassImage] | None = None
     bbox: BBox | None = None
     rotation_k: int = 0
+    orientation_uncertain: bool = False
 
 
 @dataclass

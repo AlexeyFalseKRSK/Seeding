@@ -48,16 +48,16 @@ def test_append_page_keeps_storage_lists_in_sync():
     app, created = _ensure_offscreen_qt()
     window = ImageEditor("dummy_weights.pt", "dummy_classify.pt")
     assert window.canvas_stack.currentWidget() is window.empty_state
-    assert window.right_tabs.count() == 2
 
     window._append_page(np.zeros((32, 32, 3), dtype=np.uint8), "page1.png")
     window._append_page(np.zeros((24, 24, 3), dtype=np.uint8), "page2.png")
+    window._refresh_tree()
     window.display_image_with_boxes(0)
 
     assert len(window.image_storage.images) == 2
     assert len(window.image_storage.source_files) == 2
     assert len(window.image_storage.class_object_image or []) == 2
-    assert window.project_files_list.count() == 2
+    assert window.tree_widget.topLevelItemCount() == 2
     assert window.canvas_stack.currentWidget() is window.graphics_view
 
     window.close()
@@ -158,7 +158,7 @@ def test_find_seedlings_updates_tree_and_statistics():
 
     assert len(window.image_storage.class_object_image[0]) == 1
     assert window.tree_widget.topLevelItemCount() == 1
-    assert not window.tree_widget.topLevelItem(0).isExpanded()
+    assert window.tree_widget.topLevelItem(0).isExpanded()
     assert window.statistics_panel._summary.objects_count == 1
 
     window.close()
@@ -358,12 +358,12 @@ def test_tree_and_statistics_follow_active_page():
             ),
         ],
     ]
-    window._refresh_thumbnails_panel()
+    window._refresh_tree()
 
     window._select_page(1)
 
-    assert window.tree_widget.topLevelItemCount() == 1
-    assert window.tree_widget.topLevelItem(0).data(0, Qt.UserRole)["index"] == 1
+    assert window.tree_widget.topLevelItemCount() == 2
+    assert window.tree_widget.currentItem().data(0, Qt.UserRole)["index"] == 1
     assert window.statistics_panel._summary.objects_count == 2
 
     window.close()
