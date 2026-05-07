@@ -104,6 +104,7 @@ from seeding.ui.bbox_item import BBoxItem
 from seeding.ui.icon_manager import IconManager
 from seeding.ui.statistics_panel import StatisticsPanel
 from seeding.ui.tree_widget import LayerTreeWidget
+from seeding.session_service import save_session
 from seeding.user_service import record_user_action
 from seeding.utils import clip_bbox_to_image, rotate_bbox
 
@@ -1085,6 +1086,13 @@ class ImageEditor(QMainWindow):
             shortcut="Ctrl+R",
             fallback_standard_icon=QStyle.SP_BrowserReload,
         )
+        self.action_save = self._create_action(
+            "action_report.svg",
+            "Сохранить",
+            self._on_save,
+            shortcut="Ctrl+S",
+            fallback_standard_icon=QStyle.SP_DialogSaveButton,
+        )
         self.action_report = self._create_action(
             "action_report.svg",
             "Отчёт",
@@ -1128,6 +1136,7 @@ class ImageEditor(QMainWindow):
         toolbar.addWidget(self.btn_classify)
         toolbar.addAction(self.action_rotate)
         toolbar.addSeparator()
+        toolbar.addAction(self.action_save)
         toolbar.addAction(self.action_report)
         toolbar.addSeparator()
         toolbar.addAction(self.action_zoom_in)
@@ -2301,6 +2310,7 @@ class ImageEditor(QMainWindow):
             f"Детекция завершена для страницы {self._active_image_index}; объектов: {len(objects)}",
         )
         self.statusBar().showMessage(f"Найдено растений: {len(objects)}", 3000)
+        self._auto_save_session()
 
     def find_all_seedlings(self) -> None:
         """Выполняет детекцию сеянцев на всех страницах текущего проекта."""
@@ -2348,6 +2358,7 @@ class ImageEditor(QMainWindow):
             f"Пакетная детекция растений завершена: {processed}/{total}",
             3000,
         )
+        self._auto_save_session()
 
     def find_all_seedlings_new_only(self) -> None:
         """Выполняет детекцию только на страницах без существующих результатов."""
@@ -2407,6 +2418,7 @@ class ImageEditor(QMainWindow):
         self.statusBar().showMessage(
             f"Поиск завершён: обработано {processed} новых страниц", 3000
         )
+        self._auto_save_session()
 
     def classify(self) -> None:
         """Классифицирует части растений внутри найденных объектов проекта."""
@@ -2472,6 +2484,7 @@ class ImageEditor(QMainWindow):
             f"Сегментация завершена; обработано объектов: {processed}",
         )
         self.statusBar().showMessage("Сегментация завершена", 3000)
+        self._auto_save_session()
 
     def classify_new_only(self) -> None:
         """Сегментирует только сеянцы без существующих результатов сегментации."""
@@ -2542,6 +2555,7 @@ class ImageEditor(QMainWindow):
         self.statusBar().showMessage(
             f"Сегментация завершена: обработано {processed} новых сеянцев", 3000
         )
+        self._auto_save_session()
 
     def rotate_image(self) -> None:
         """Поворачивает текущую страницу или выбранный кроп и обновляет отображение."""
@@ -2610,6 +2624,7 @@ class ImageEditor(QMainWindow):
                 output_path,
             )
             self.app_state.last_report_path = saved_path
+            self._auto_save_session()
             self._log_action(
                 "generate_report",
                 f"Сформирован PDF-отчёт: {saved_path}",
@@ -2624,3 +2639,18 @@ class ImageEditor(QMainWindow):
                 "Ошибка отчёта",
                 f"Не удалось создать PDF-отчёт:\n{error}",
             )
+
+    def _on_save(self) -> None:
+        """Сохраняет текущую сессию по запросу пользователя."""
+        try:
+            save_session(self.app_state)
+            self.statusBar().showMessage("Сессия сохранена.", 3000)
+        except Exception as exc:
+            QMessageBox.warning(self, "Ошибка сохранения", str(exc))
+
+    def _auto_save_session(self) -> None:
+        """Автоматически сохраняет сессию после инференса."""
+        try:
+            save_session(self.app_state)
+        except Exception:
+            pass

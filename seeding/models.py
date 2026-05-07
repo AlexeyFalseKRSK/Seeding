@@ -82,6 +82,8 @@ class AppState:
     zoom_factor: float = 1.0
     pixels_per_mm: float = 0.0
     last_report_path: str = ""
+    session_id: int | None = None
+    current_user_id: int | None = None
 
 
 __all__ = [
