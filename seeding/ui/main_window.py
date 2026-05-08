@@ -83,9 +83,15 @@ from seeding.config import (
     WINDOW_WIDTH,
     WINDOW_X,
     WINDOW_Y,
+    YOLO_BATCH_SIZE_CLASSIFY,
     ZOOM_FACTOR_INCREMENT,
 )
 from seeding.inference import InferenceBackend, load_inference_backend
+
+try:
+    import torch  # noqa: F401 — загружает c10.dll в главном потоке до QThread
+except Exception:
+    pass
 from seeding.models import (
     AllClassImage,
     AppState,
@@ -104,7 +110,8 @@ from seeding.ui.bbox_item import BBoxItem
 from seeding.ui.icon_manager import IconManager
 from seeding.ui.statistics_panel import StatisticsPanel
 from seeding.ui.tree_widget import LayerTreeWidget
-from seeding.session_service import save_session
+from seeding.session_service import load_session, save_session
+from seeding.ui.session_picker import SessionPickerDialog
 from seeding.user_service import record_user_action
 from seeding.utils import clip_bbox_to_image, rotate_bbox
 
@@ -263,7 +270,10 @@ class ImageEditor(QMainWindow):
         self.current_user = current_user
         self.detect_model: InferenceBackend | None = None
         self.classify_model: InferenceBackend | None = None
-        self.app_state = AppState(image_storage=OriginalImage())
+        self.app_state = AppState(
+            image_storage=OriginalImage(),
+            current_user_id=current_user.id if current_user else None,
+        )
         self.image_storage = self.app_state.image_storage
         self._active_image_index = 0
         self._display_target: tuple[Any, ...] = ("page", 0)
@@ -1052,6 +1062,13 @@ class ImageEditor(QMainWindow):
             shortcut="Ctrl+Shift+O",
             fallback_standard_icon=QStyle.SP_FileIcon,
         )
+        self.action_open_session = self._create_action(
+            "action_open.svg",
+            "Открыть сессию",
+            self._open_session_dialog,
+            shortcut="Ctrl+Alt+O",
+            fallback_standard_icon=QStyle.SP_FileDialogDetailedView,
+        )
         self.action_find = self._create_action(
             "action_detect.svg",
             "Найти",
@@ -1160,6 +1177,7 @@ class ImageEditor(QMainWindow):
         file_menu = self.menuBar().addMenu("Файл")
         file_menu.addAction(self.action_open)
         file_menu.addAction(self.action_add)
+        file_menu.addAction(self.action_open_session)
         file_menu.addSeparator()
         file_menu.addAction(self.action_report)
         file_menu.addSeparator()
@@ -2420,6 +2438,114 @@ class ImageEditor(QMainWindow):
         )
         self._auto_save_session()
 
+    def _iter_batches(self, items, batch_size: int):
+        """Yield stable batches for CPU-friendly model inference."""
+        size = max(1, int(batch_size))
+        for start in range(0, len(items), size):
+            yield items[start : start + size]
+
+    def _orientation_needs_rotated_probe(self, results) -> bool:
+        """Return True when the legacy orientation fallback would test 180 degrees."""
+        if not results:
+            return True
+        marker_classes = {
+            "root",
+            "rootcedr",
+            "rootpinus",
+            "flower",
+            "inflorescence",
+            "flowercedr",
+            "flowerpinus",
+        }
+        for result in results:
+            for box in result.boxes:
+                class_name = str(result.names[int(box.cls)]).lower()
+                if class_name in marker_classes:
+                    return False
+        return True
+
+    def _results_have_boxes(self, results) -> bool:
+        """Return True when a normalized inference result contains any boxes."""
+        return any(bool(result.boxes) for result in results or [])
+
+    def _classify_pending_objects(
+        self,
+        model: InferenceBackend,
+        pending: list[tuple[int, int, ObjectImage]],
+        progress: AnalysisProgressDialog,
+    ) -> int:
+        """Segment pending objects in batches while preserving object order."""
+        processed = 0
+        total = len(pending)
+        batch_size = max(1, int(YOLO_BATCH_SIZE_CLASSIFY))
+
+        for batch in self._iter_batches(pending, batch_size):
+            if progress.wasCanceled():
+                break
+
+            progress.setStep(f"Сеянец {processed + 1} из {total}...")
+            orient_results_batch = model.predict_batch([obj.image[0] for _, _, obj in batch])
+
+            final_results_by_item: dict[int, list] = {}
+            rotated_items: list[tuple[int, int, int, ObjectImage]] = []
+            rotated_images: list[np.ndarray] = []
+            probe_items: list[tuple[int, ObjectImage]] = []
+            probe_images: list[np.ndarray] = []
+
+            for local_index, (page_index, object_index, obj) in enumerate(batch):
+                orient_results = orient_results_batch[local_index]
+                oriented_crop, was_rotated, uncertain = orient_crop_upright(
+                    obj.image[0], orient_results
+                )
+                if was_rotated:
+                    obj.image[0] = oriented_crop
+                    obj.rotation_k = (obj.rotation_k + 2) % 4
+                    rotated_items.append((local_index, page_index, object_index, obj))
+                    rotated_images.append(obj.image[0])
+                else:
+                    final_results_by_item[local_index] = orient_results
+                obj.orientation_uncertain = uncertain
+                if (
+                    not was_rotated
+                    and self._orientation_needs_rotated_probe(orient_results)
+                ):
+                    probe_items.append((local_index, obj))
+                    probe_images.append(np.rot90(obj.image[0], k=2))
+
+            if probe_images:
+                probe_results_batch = model.predict_batch(probe_images)
+                for probe_index, (local_index, obj) in enumerate(probe_items):
+                    if self._results_have_boxes(probe_results_batch[probe_index]):
+                        obj.image[0] = probe_images[probe_index]
+                        obj.rotation_k = (obj.rotation_k + 2) % 4
+                        rotated_items.append((local_index, -1, -1, obj))
+                        rotated_images.append(obj.image[0])
+                    else:
+                        final_results_by_item[local_index] = orient_results_batch[
+                            local_index
+                        ]
+
+            if rotated_images:
+                rotated_results_batch = model.predict_batch(rotated_images)
+                for rotated_index, (local_index, _, _, _) in enumerate(rotated_items):
+                    final_results_by_item[local_index] = rotated_results_batch[
+                        rotated_index
+                    ]
+
+            for local_index, (page_index, object_index, _) in enumerate(batch):
+                run_classification_for_selection(
+                    self.app_state,
+                    page_index,
+                    object_index,
+                    final_results_by_item.get(local_index, []),
+                )
+                processed += 1
+                progress.setValue(processed)
+                if progress.wasCanceled():
+                    break
+
+        return processed
+
     def classify(self) -> None:
         """Классифицирует части растений внутри найденных объектов проекта."""
         if not self.image_storage.class_object_image or not any(
@@ -2441,39 +2567,15 @@ class ImageEditor(QMainWindow):
         progress.setRange(0, total_objects)
         progress.show()
 
-        processed = 0
-        for page_index, objects in enumerate(
-            self.image_storage.class_object_image or []
-        ):
-            for object_index, obj in enumerate(objects):
-                if progress.wasCanceled():
-                    progress.close()
-                    self._refresh_tree()
-                    self._refresh_statistics_panel()
-                    self._restore_display(preserve_view=True)
-                    return
-                if not obj.image:
-                    continue
-                progress.setStep(f"Сеянец {processed + 1} из {total_objects}…")
-                # Прогон 1: определяем ориентацию
-                orient_results = model.predict(obj.image[0])
-                oriented_crop, was_rotated, uncertain = orient_crop_upright(
-                    obj.image[0], orient_results, predict_fn=model.predict
-                )
-                if was_rotated:
-                    obj.image[0] = oriented_crop
-                    obj.rotation_k = (obj.rotation_k + 2) % 4
-                obj.orientation_uncertain = uncertain
-                # Прогон 2: финальная сегментация на правильно ориентированном кропе
-                results = model.predict(obj.image[0]) if was_rotated else orient_results
-                run_classification_for_selection(
-                    self.app_state,
-                    page_index,
-                    object_index,
-                    results,
-                )
-                processed += 1
-                progress.setValue(processed)
+        pending = [
+            (page_index, object_index, obj)
+            for page_index, objects in enumerate(
+                self.image_storage.class_object_image or []
+            )
+            for object_index, obj in enumerate(objects)
+            if obj.image
+        ]
+        processed = self._classify_pending_objects(model, pending, progress)
 
         progress.close()
         self._refresh_tree()
@@ -2517,32 +2619,7 @@ class ImageEditor(QMainWindow):
         progress.setRange(0, total)
         progress.show()
 
-        processed = 0
-        for page_index, object_index, obj in pending:
-            if progress.wasCanceled():
-                progress.close()
-                self._refresh_tree()
-                self._refresh_statistics_panel()
-                self._restore_display(preserve_view=True)
-                return
-            progress.setStep(f"Сеянец {processed + 1} из {total}…")
-            orient_results = model.predict(obj.image[0])
-            oriented_crop, was_rotated, uncertain = orient_crop_upright(
-                obj.image[0], orient_results, predict_fn=model.predict
-            )
-            if was_rotated:
-                obj.image[0] = oriented_crop
-                obj.rotation_k = (obj.rotation_k + 2) % 4
-            obj.orientation_uncertain = uncertain
-            results = model.predict(obj.image[0]) if was_rotated else orient_results
-            run_classification_for_selection(
-                self.app_state,
-                page_index,
-                object_index,
-                results,
-            )
-            processed += 1
-            progress.setValue(processed)
+        processed = self._classify_pending_objects(model, pending, progress)
 
         progress.close()
         self._refresh_tree()
@@ -2647,6 +2724,52 @@ class ImageEditor(QMainWindow):
             self.statusBar().showMessage("Сессия сохранена.", 3000)
         except Exception as exc:
             QMessageBox.warning(self, "Ошибка сохранения", str(exc))
+
+    def _open_session_dialog(self) -> None:
+        """Открывает диалог выбора сохранённой сессии и восстанавливает её."""
+        user_id = self.app_state.current_user_id
+        if user_id is None:
+            self._show_info("Нет пользователя", "Войдите в систему чтобы открыть сессию.")
+            return
+
+        dlg = SessionPickerDialog(user_id=user_id, parent=self)
+        if dlg.exec_() != SessionPickerDialog.Accepted:
+            return
+
+        session_id = dlg.selected_session_id()
+        if session_id is None:
+            return
+
+        try:
+            state = load_session(session_id)
+        except Exception as exc:
+            self._show_error("Ошибка загрузки сессии", str(exc))
+            return
+
+        if state is None:
+            self._show_error("Сессия не найдена", f"Сессия {session_id} не найдена в БД.")
+            return
+
+        missing = getattr(state, "_missing_source", None)
+
+        self.app_state = state
+        self.image_storage = state.image_storage
+        self.pixels_per_mm = state.pixels_per_mm
+
+        self._refresh_tree()
+        self._refresh_statistics_panel()
+        self._restore_display(preserve_view=False)
+
+        if missing:
+            self._show_info(
+                "Файл не найден",
+                f"Исходный файл не найден:\n{missing}\n\n"
+                "Данные анализа восстановлены, изображения недоступны.",
+            )
+        else:
+            self.statusBar().showMessage(
+                f"Сессия восстановлена: {state.image_storage.file_path}", 4000
+            )
 
     def _auto_save_session(self) -> None:
         """Автоматически сохраняет сессию после инференса."""
