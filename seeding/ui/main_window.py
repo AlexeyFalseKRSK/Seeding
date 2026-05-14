@@ -42,6 +42,7 @@ from PyQt5.QtWidgets import (
     QGraphicsItem,
     QGraphicsLineItem,
     QGraphicsPixmapItem,
+    QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsTextItem,
     QGraphicsView,
@@ -57,6 +58,7 @@ from PyQt5.QtWidgets import (
     QSizePolicy,
     QSplitter,
     QStackedLayout,
+    QStackedWidget,
     QStyle,
     QToolBar,
     QToolButton,
@@ -89,6 +91,12 @@ from seeding.image_loader import (
     load_pages_from_path,
 )
 from seeding.inference import InferenceBackend, load_inference_backend
+from seeding.mask_refiner import (
+    bitmap_to_polygon,
+    build_refine_context,
+    polygon_to_bitmap,
+    refine_mask_bitmap,
+)
 
 try:
     import torch  # noqa: F401 — загружает c10.dll в главном потоке до QThread
@@ -493,6 +501,11 @@ class ImageEditor(QMainWindow):
         self._show_boxes = True
         self._show_masks = True
         self._interaction_mode = "view"
+        self._box_draw_active = False
+        self._box_draw_start: QPointF | None = None
+        self._box_draw_item: QGraphicsRectItem | None = None
+        self._pending_box_item: BBoxItem | None = None
+        self._pending_box_target: tuple[Any, ...] | None = None
         self.zoom_factor = 1.0
         self.min_fit_zoom = 1.0
         self.pixels_per_mm = CALIBRATION_PIXELS_PER_MM_DEFAULT
@@ -648,19 +661,54 @@ class ImageEditor(QMainWindow):
         interaction_title.setWordWrap(True)
         interaction_layout.addWidget(interaction_title)
 
-        interaction_hint = QLabel(
-            "Управление отображением слоев на изображении.",
-            interaction_card,
+        # --- Переключатель режима (всегда виден) ---
+        mode_bar = QFrame(interaction_card)
+        mode_bar.setObjectName("interactionModeBar")
+        mode_bar_layout = QHBoxLayout(mode_bar)
+        mode_bar_layout.setContentsMargins(6, 6, 6, 6)
+        mode_bar_layout.setSpacing(6)
+
+        self.view_mode_button = QPushButton("Просмотр", mode_bar)
+        self.view_mode_button.setCheckable(True)
+        self.view_mode_button.setChecked(True)
+        self.view_mode_button.setProperty("segmented", "true")
+        self.view_mode_button.toggled.connect(
+            lambda checked: checked and self._set_interaction_mode("view")
         )
-        interaction_hint.setObjectName("panelHint")
-        interaction_hint.setWordWrap(True)
-        interaction_layout.addWidget(interaction_hint)
+        mode_bar_layout.addWidget(self.view_mode_button)
 
-        layers_title = QLabel("Отображение", interaction_card)
-        layers_title.setObjectName("panelHint")
-        interaction_layout.addWidget(layers_title)
+        self.edit_boxes_mode_button = QPushButton("Ред. боксов", mode_bar)
+        self.edit_boxes_mode_button.setCheckable(True)
+        self.edit_boxes_mode_button.setProperty("segmented", "true")
+        self.edit_boxes_mode_button.setToolTip("Редактировать и добавлять bbox.")
+        self.edit_boxes_mode_button.toggled.connect(
+            lambda checked: checked and self._set_interaction_mode("edit_boxes")
+        )
+        mode_bar_layout.addWidget(self.edit_boxes_mode_button)
 
-        toggle_bar = QFrame(interaction_card)
+        # Stub: kept for backward compatibility with tests; not shown in UI
+        self.edit_masks_mode_button = QPushButton("Ред. маски", mode_bar)
+        self.edit_masks_mode_button.setCheckable(True)
+        self.edit_masks_mode_button.setEnabled(False)
+        self.edit_masks_mode_button.setVisible(False)
+
+        interaction_layout.addWidget(mode_bar)
+
+        # --- Контекстный стек ---
+        self.tools_stack = QStackedWidget(interaction_card)
+        interaction_layout.addWidget(self.tools_stack)
+
+        # Страница 0: Просмотр
+        view_page = QWidget()
+        view_layout = QVBoxLayout(view_page)
+        view_layout.setContentsMargins(0, 4, 0, 0)
+        view_layout.setSpacing(6)
+
+        overlays_label = QLabel("Показ оверлеев", view_page)
+        overlays_label.setObjectName("panelHint")
+        view_layout.addWidget(overlays_label)
+
+        toggle_bar = QFrame(view_page)
         toggle_bar.setObjectName("overlayToggleBar")
         toggle_bar_layout = QHBoxLayout(toggle_bar)
         toggle_bar_layout.setContentsMargins(6, 6, 6, 6)
@@ -680,42 +728,85 @@ class ImageEditor(QMainWindow):
         self.show_masks_button.toggled.connect(self._set_show_masks)
         toggle_bar_layout.addWidget(self.show_masks_button)
 
-        interaction_layout.addWidget(toggle_bar)
+        view_layout.addWidget(toggle_bar)
+        view_layout.addStretch()
+        self.tools_stack.addWidget(view_page)  # index 0
 
-        mode_title = QLabel("Режим работы", interaction_card)
-        mode_title.setObjectName("panelHint")
-        interaction_layout.addWidget(mode_title)
+        # Страница 1: Ред. боксов (ожидание)
+        edit_page = QWidget()
+        edit_layout = QVBoxLayout(edit_page)
+        edit_layout.setContentsMargins(0, 4, 0, 0)
+        edit_layout.setSpacing(6)
 
-        mode_bar = QFrame(interaction_card)
-        mode_bar.setObjectName("interactionModeBar")
-        mode_bar_layout = QHBoxLayout(mode_bar)
-        mode_bar_layout.setContentsMargins(6, 6, 6, 6)
-        mode_bar_layout.setSpacing(6)
+        self.add_box_button = QPushButton("+ Добавить бокс", edit_page)
+        self.add_box_button.setObjectName("primaryToolButton")
+        self.add_box_button.setToolTip("Нарисовать новый bbox мышью.")
+        self.add_box_button.clicked.connect(self._start_add_box_mode)
+        edit_layout.addWidget(self.add_box_button)
 
-        self.view_mode_button = QPushButton("Просмотр", mode_bar)
-        self.view_mode_button.setCheckable(True)
-        self.view_mode_button.setChecked(True)
-        self.view_mode_button.setProperty("segmented", "true")
-        self.view_mode_button.toggled.connect(
-            lambda checked: checked and self._set_interaction_mode("view")
-        )
-        mode_bar_layout.addWidget(self.view_mode_button)
+        secondary_row = QFrame(edit_page)
+        secondary_row_layout = QHBoxLayout(secondary_row)
+        secondary_row_layout.setContentsMargins(0, 0, 0, 0)
+        secondary_row_layout.setSpacing(6)
 
-        self.edit_boxes_mode_button = QPushButton("Ред. боксов", mode_bar)
-        self.edit_boxes_mode_button.setCheckable(True)
-        self.edit_boxes_mode_button.setProperty("segmented", "true")
-        self.edit_boxes_mode_button.setEnabled(False)
-        self.edit_boxes_mode_button.setToolTip("Режим будет добавлен позже.")
-        mode_bar_layout.addWidget(self.edit_boxes_mode_button)
+        self.rerun_selected_button = QToolButton(secondary_row)
+        self.rerun_selected_button.setObjectName("annotationToolButton")
+        self.rerun_selected_button.setText("Инференс")
+        self.rerun_selected_button.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
+        self.rerun_selected_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.rerun_selected_button.setToolTip("Повторить сегментацию выбранного сеянца.")
+        self.rerun_selected_button.clicked.connect(self.classify_selected)
+        secondary_row_layout.addWidget(self.rerun_selected_button)
 
-        self.edit_masks_mode_button = QPushButton("Ред. маски", mode_bar)
-        self.edit_masks_mode_button.setCheckable(True)
-        self.edit_masks_mode_button.setProperty("segmented", "true")
-        self.edit_masks_mode_button.setEnabled(False)
-        self.edit_masks_mode_button.setToolTip("Режим будет добавлен позже.")
-        mode_bar_layout.addWidget(self.edit_masks_mode_button)
+        self.delete_annotation_button = QToolButton(secondary_row)
+        self.delete_annotation_button.setObjectName("annotationDangerButton")
+        self.delete_annotation_button.setText("Удалить")
+        self.delete_annotation_button.setIcon(self.style().standardIcon(QStyle.SP_TrashIcon))
+        self.delete_annotation_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.delete_annotation_button.setToolTip("Удалить выбранный bbox или часть.")
+        self.delete_annotation_button.clicked.connect(self._delete_selected_annotation)
+        secondary_row_layout.addWidget(self.delete_annotation_button)
 
-        interaction_layout.addWidget(mode_bar)
+        edit_layout.addWidget(secondary_row)
+        edit_layout.addStretch()
+        self.tools_stack.addWidget(edit_page)  # index 1
+
+        # Страница 2: Рисование bbox
+        drawing_page = QWidget()
+        drawing_layout = QVBoxLayout(drawing_page)
+        drawing_layout.setContentsMargins(0, 4, 0, 0)
+        drawing_layout.setSpacing(8)
+
+        self.drawing_hint_label = QLabel("✏  Нарисуйте бокс на холсте", drawing_page)
+        self.drawing_hint_label.setObjectName("drawingHint")
+        self.drawing_hint_label.setWordWrap(True)
+        drawing_layout.addWidget(self.drawing_hint_label)
+
+        confirm_row = QFrame(drawing_page)
+        confirm_row_layout = QHBoxLayout(confirm_row)
+        confirm_row_layout.setContentsMargins(0, 0, 0, 0)
+        confirm_row_layout.setSpacing(6)
+
+        self.confirm_box_button = QToolButton(confirm_row)
+        self.confirm_box_button.setObjectName("annotationConfirmButton")
+        self.confirm_box_button.setText("✓ Принять")
+        self.confirm_box_button.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self.confirm_box_button.setToolTip("Подтвердить положение нового bbox.")
+        self.confirm_box_button.clicked.connect(self._confirm_pending_box)
+        confirm_row_layout.addWidget(self.confirm_box_button)
+
+        self.cancel_box_button = QToolButton(confirm_row)
+        self.cancel_box_button.setObjectName("annotationToolButton")
+        self.cancel_box_button.setText("✗ Отменить")
+        self.cancel_box_button.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self.cancel_box_button.setToolTip("Отменить добавление bbox.")
+        self.cancel_box_button.clicked.connect(self._cancel_add_box_mode)
+        confirm_row_layout.addWidget(self.cancel_box_button)
+
+        drawing_layout.addWidget(confirm_row)
+        drawing_layout.addStretch()
+        self.tools_stack.addWidget(drawing_page)  # index 2
+
         left_layout.addWidget(interaction_card)
         splitter.addWidget(left_panel)
 
@@ -766,6 +857,7 @@ class ImageEditor(QMainWindow):
         self.canvas_stack = QStackedLayout()
 
         self.graphics_scene = QGraphicsScene(self)
+        self.graphics_scene.selectionChanged.connect(self._update_annotation_controls)
         self.graphics_view = CanvasGraphicsView(self.graphics_scene, self)
         self.graphics_view.setObjectName("centralView")
         self.graphics_view.setFrameShape(QFrame.NoFrame)
@@ -783,6 +875,7 @@ class ImageEditor(QMainWindow):
         splitter.setSizes([SPLITTER_SIZES[0], SPLITTER_SIZES[1] + SPLITTER_SIZES[2]])
         self._set_canvas_empty(True)
         self._update_canvas_status()
+        self._update_annotation_controls()
 
     def _build_empty_state(self) -> QWidget:
         """Создаёт заглушку, показываемую на холсте до открытия первого файла."""
@@ -1230,6 +1323,49 @@ class ImageEditor(QMainWindow):
                     self.zoom_out(anchor_view_pos=event.pos())
                 return True
 
+            if self._box_draw_active:
+                if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                    scene_pos = self._clamp_scene_pos_to_image(
+                        self.graphics_view.mapToScene(event.pos())
+                    )
+                    if scene_pos is None:
+                        return True
+                    self._box_draw_start = scene_pos
+                    self._box_draw_item = self.graphics_scene.addRect(
+                        QRectF(scene_pos, scene_pos),
+                        QPen(QColor(255, 255, 255), 2, Qt.DashLine),
+                        QBrush(Qt.transparent),
+                    )
+                    self._box_draw_item.setZValue(5)
+                    return True
+
+                if (
+                    event.type() == QEvent.MouseMove
+                    and self._box_draw_start is not None
+                    and self._box_draw_item is not None
+                ):
+                    scene_pos = self._clamp_scene_pos_to_image(
+                        self.graphics_view.mapToScene(event.pos())
+                    )
+                    if scene_pos is not None:
+                        self._box_draw_item.setRect(
+                            QRectF(self._box_draw_start, scene_pos).normalized()
+                        )
+                    return True
+
+                if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+                    rect = (
+                        self._box_draw_item.rect().normalized()
+                        if self._box_draw_item is not None
+                        else QRectF()
+                    )
+                    self._finish_add_box(rect)
+                    return True
+
+                if event.type() == QEvent.MouseButtonPress and event.button() == Qt.RightButton:
+                    self._cancel_add_box_mode()
+                    return True
+
             if self._measure_mode:
                 if event.type() == QEvent.MouseButtonPress:
                     if event.button() == Qt.RightButton:
@@ -1270,6 +1406,14 @@ class ImageEditor(QMainWindow):
 
     def keyPressEvent(self, event) -> None:
         """Отменяет измерение по `Esc` и передаёт остальные клавиши стандартной обработке."""
+        if event.key() == Qt.Key_Delete and self._interaction_mode == "edit_boxes":
+            self._delete_selected_annotation()
+            event.accept()
+            return
+        if event.key() == Qt.Key_Escape and self._box_draw_active:
+            self._cancel_add_box_mode()
+            event.accept()
+            return
         if event.key() == Qt.Key_Escape and (
             self._measure_mode or self._measure_start_scene_pos is not None
         ):
@@ -1309,13 +1453,61 @@ class ImageEditor(QMainWindow):
         if mode not in {"view", "edit_boxes", "edit_masks"}:
             return
         self._interaction_mode = mode
+        self._box_draw_active = False
+        self._box_draw_start = None
+        if self._box_draw_item is not None:
+            try:
+                scene = self._box_draw_item.scene()
+                if scene is not None:
+                    scene.removeItem(self._box_draw_item)
+            except RuntimeError:
+                pass
+            self._box_draw_item = None
+        if mode != "edit_boxes" and hasattr(self, "_clear_pending_box"):
+            self._clear_pending_box()
+        for button, button_mode in (
+            (self.view_mode_button, "view"),
+            (self.edit_boxes_mode_button, "edit_boxes"),
+        ):
+            button.blockSignals(True)
+            button.setChecked(mode == button_mode)
+            button.blockSignals(False)
         self._apply_interaction_mode_to_rect_items()
 
     def _apply_interaction_mode_to_rect_items(self) -> None:
         """Применяет текущий режим редактирования ко всем рамкам на сцене."""
         editable = self._interaction_mode == "edit_boxes"
         for item in self.rect_items:
-            item.setEditable(editable)
+            item.setEditable(editable and bool(getattr(item, "_manual_edit_enabled", True)))
+        self._update_annotation_controls()
+
+    def _update_annotation_controls(self) -> None:
+        """Updates annotation toolbar availability for the current view and mode."""
+        if not hasattr(self, "add_box_button"):
+            return
+        has_image = self._pixmap_item is not None
+        editing_boxes = self._interaction_mode == "edit_boxes"
+        selected_payload = self.app_state.selected_item or {}
+        can_rerun = self._current_crop_context() is not None or selected_payload.get("type") == "seeding"
+        has_pending_box = self._pending_box_item is not None
+        drawing_active = self._box_draw_active or has_pending_box
+
+        # Переключение страницы стека
+        if not editing_boxes:
+            self.tools_stack.setCurrentIndex(0)
+        elif drawing_active:
+            self.tools_stack.setCurrentIndex(2)
+        else:
+            self.tools_stack.setCurrentIndex(1)
+
+        # Состояние кнопок
+        self.add_box_button.setEnabled(has_image and editing_boxes and not drawing_active)
+        self.rerun_selected_button.setEnabled(has_image and can_rerun)
+        self.delete_annotation_button.setEnabled(
+            has_image and not drawing_active and self._selected_annotation_object() is not None
+        )
+        self.confirm_box_button.setEnabled(has_pending_box)
+        self.cancel_box_button.setEnabled(True)
 
     def _build_toolbar(self) -> None:
         """Создаёт верхний toolbar с основными действиями приложения."""
@@ -1476,6 +1668,7 @@ class ImageEditor(QMainWindow):
         find_all_menu.addAction("Найти только на новых страницах", self.find_all_seedlings_new_only)
         find_all_menu.addAction("Найти на всех страницах заново", self.find_all_seedlings)
         classify_menu = analysis_menu.addMenu("Сегментировать")
+        classify_menu.addAction("Сегментировать выбранный заново", self.classify_selected)
         classify_menu.addAction("Сегментировать только новые", self.classify_new_only)
         classify_menu.addAction("Сегментировать все заново", self.classify)
         analysis_menu.addAction(self.action_rotate)
@@ -2167,6 +2360,8 @@ class ImageEditor(QMainWindow):
         self.graphics_scene.clear()
         self.rect_items = []
         self.mask_items = []
+        self._pending_box_item = None
+        self._pending_box_target = None
         self._pixmap_item = None
         self._original_pixmap = None
         self._reset_measure_state(clear_items=True)
@@ -2494,9 +2689,15 @@ class ImageEditor(QMainWindow):
                     item = BBoxItem(
                         rect,
                         seed_obj,
+                        bbox_commit_callback=lambda obj, page=img_idx: self._commit_seedling_bbox(
+                            page,
+                            obj,
+                            auto_segment=True,
+                        ),
                         class_label=self._display_part_name(seed_obj.class_name),
                         pixels_per_mm=self.pixels_per_mm,
                     )
+                    item._manual_edit_enabled = True
                     item.setZValue(1.0)
                     self.graphics_scene.addItem(item)
                     self.rect_items.append(item)
@@ -2519,6 +2720,7 @@ class ImageEditor(QMainWindow):
                             class_label=self._display_part_name(part_obj.class_name),
                             pixels_per_mm=self.pixels_per_mm,
                         )
+                        item._manual_edit_enabled = False
                         item.setZValue(1.0)
                         self.graphics_scene.addItem(item)
                         self.rect_items.append(item)
@@ -2533,15 +2735,346 @@ class ImageEditor(QMainWindow):
                 item = BBoxItem(
                     rect,
                     part_obj,
+                    bbox_commit_callback=lambda obj: self._commit_part_bbox(obj),
                     class_label=self._display_part_name(part_obj.class_name),
                     pixels_per_mm=self.pixels_per_mm,
                 )
+                item._manual_edit_enabled = True
                 item.setZValue(1.0)
                 self.graphics_scene.addItem(item)
                 self.rect_items.append(item)
 
         self._apply_interaction_mode_to_rect_items()
         self._update_canvas_status()
+
+
+    def _current_page_objects(self, page_index: int) -> list[ObjectImage]:
+        if self.image_storage.class_object_image is None:
+            self.image_storage.class_object_image = []
+        while len(self.image_storage.class_object_image) < len(self.image_storage.images):
+            self.image_storage.class_object_image.append([])
+        return self.image_storage.class_object_image[page_index]
+
+    def _current_crop_context(self) -> tuple[int, int, ObjectImage] | None:
+        if len(self._display_target) != 3 or self._display_target[0] != "crop":
+            return None
+        page_index = int(self._display_target[1])
+        object_index = int(self._display_target[2])
+        if not self.image_storage.class_object_image:
+            return None
+        if page_index >= len(self.image_storage.class_object_image):
+            return None
+        objects = self.image_storage.class_object_image[page_index]
+        if object_index >= len(objects):
+            return None
+        return page_index, object_index, objects[object_index]
+
+    def _start_add_box_mode(self) -> None:
+        if self._pixmap_item is None:
+            return
+        if self._interaction_mode != "edit_boxes":
+            self._set_interaction_mode("edit_boxes")
+        self._clear_pending_box()
+        self._box_draw_active = True
+        self._box_draw_start = None
+        self.statusBar().showMessage(
+            "Нарисуйте bbox, затем подгоните его ручками и нажмите ОК.",
+            4000,
+        )
+        self._update_annotation_controls()
+
+    def _clear_pending_box(self) -> None:
+        if self._pending_box_item is not None:
+            try:
+                scene = self._pending_box_item.scene()
+                if scene is not None:
+                    scene.removeItem(self._pending_box_item)
+            except RuntimeError:
+                pass
+        self._pending_box_item = None
+        self._pending_box_target = None
+
+    def _cancel_add_box_mode(self) -> None:
+        self._box_draw_active = False
+        self._box_draw_start = None
+        if self._box_draw_item is not None:
+            try:
+                scene = self._box_draw_item.scene()
+                if scene is not None:
+                    scene.removeItem(self._box_draw_item)
+            except RuntimeError:
+                pass
+            self._box_draw_item = None
+        self._clear_pending_box()
+        self._update_annotation_controls()
+
+    def _finish_add_box(self, rect: QRectF) -> None:
+        self._box_draw_active = False
+        self._box_draw_start = None
+        if self._box_draw_item is not None:
+            try:
+                scene = self._box_draw_item.scene()
+                if scene is not None:
+                    scene.removeItem(self._box_draw_item)
+            except RuntimeError:
+                pass
+            self._box_draw_item = None
+        if rect.width() < 3 or rect.height() < 3:
+            self._update_annotation_controls()
+            return
+        self._create_pending_box(rect)
+
+    def _create_pending_box(self, rect: QRectF) -> None:
+        self._clear_pending_box()
+        bbox = self._bbox_from_scene_rect(rect)
+        pending = ObjectImage(class_name="new", confidence=1.0, bbox=bbox)
+        item = BBoxItem(
+            QRectF(bbox[0], bbox[1], bbox[2] - bbox[0], bbox[3] - bbox[1]),
+            pending,
+            class_label="Новый",
+            pixels_per_mm=self.pixels_per_mm,
+        )
+        item._manual_edit_enabled = True
+        item.setEditable(True)
+        item.setSelected(True)
+        item.setZValue(3.0)
+        self.graphics_scene.addItem(item)
+        self._pending_box_item = item
+        self._pending_box_target = tuple(self._display_target)
+        self._update_annotation_controls()
+        self.statusBar().showMessage(
+            "Подгоните bbox и нажмите ОК, чтобы построить маску.",
+            5000,
+        )
+
+    def _bbox_from_scene_rect(self, rect: QRectF) -> tuple[int, int, int, int]:
+        normalized = rect.normalized()
+        return (
+            int(round(normalized.left())),
+            int(round(normalized.top())),
+            int(round(normalized.right())),
+            int(round(normalized.bottom())),
+        )
+
+    def _confirm_pending_box(self) -> None:
+        if self._pending_box_item is None or self._pending_box_target is None:
+            return
+        self._pending_box_item.update_bbox()
+        bbox = self._pending_box_item.obj.bbox
+        target = self._pending_box_target
+        self._clear_pending_box()
+        self._update_annotation_controls()
+        if target[0] == "page":
+            self._add_seedling_box(int(target[1]), bbox, auto_segment=True)
+            return
+        if target[0] == "crop":
+            context = self._current_crop_context()
+            if context is not None:
+                self._add_part_box(context[2], bbox)
+
+    def _rect_mask_for_bbox(
+        self,
+        image: np.ndarray,
+        bbox: tuple[int, int, int, int],
+    ) -> tuple[np.ndarray | None, np.ndarray | None]:
+        h, w = image.shape[:2]
+        x1, y1, x2, y2 = bbox
+        polygon = np.array(
+            [[x1, y1], [x2, y1], [x2, y2], [x1, y2]],
+            dtype=np.float32,
+        )
+        coarse = polygon_to_bitmap(polygon, h, w)
+        if coarse is None:
+            return polygon, None
+        refined = refine_mask_bitmap(image, coarse, build_refine_context(image))
+        mask = refined if refined is not None else coarse
+        refined_polygon = bitmap_to_polygon(mask)
+        return (refined_polygon if refined_polygon is not None else polygon), mask
+
+    def _choose_annotation_class(self, classes: list[str], title: str) -> str | None:
+        value, ok = QInputDialog.getItem(self, title, "Класс:", classes, 0, False)
+        if not ok:
+            return None
+        return str(value)
+
+    def _add_seedling_box(
+        self,
+        page_index: int,
+        bbox,
+        *,
+        auto_segment: bool = False,
+    ) -> None:
+        page_img = self.image_storage.images[page_index]
+        height, width = page_img.shape[:2]
+        clipped = clip_bbox_to_image(bbox, width, height)
+        if clipped is None:
+            return
+        class_name = self._choose_annotation_class(["cedr", "pinus", "seeding"], "Новый сеянец")
+        if class_name is None:
+            return
+        x1, y1, x2, y2 = clipped
+        crop = page_img[y1:y2, x1:x2].copy()
+        obj = ObjectImage(
+            class_name=class_name,
+            confidence=1.0,
+            image=[crop],
+            image_all_class=None,
+            bbox=clipped,
+        )
+        objects = self._current_page_objects(page_index)
+        objects.append(obj)
+        object_index = len(objects) - 1
+        self._after_manual_annotation_change(page_index, seeding_idx=object_index)
+        if auto_segment:
+            self._segment_single_seedling(page_index, object_index, obj)
+
+    def _add_part_box(self, seed_obj: ObjectImage, bbox) -> None:
+        if not seed_obj.image:
+            return
+        crop_img = seed_obj.image[0]
+        height, width = crop_img.shape[:2]
+        clipped = clip_bbox_to_image(bbox, width, height)
+        if clipped is None:
+            return
+        class_name = self._choose_annotation_class(
+            ["root", "stem", "inflorescence"],
+            "Новая часть растения",
+        )
+        if class_name is None:
+            return
+        x1, y1, x2, y2 = clipped
+        mask_polygon, mask_bitmap = self._rect_mask_for_bbox(crop_img, clipped)
+        part = AllClassImage(
+            class_name=class_name,
+            confidence=1.0,
+            image=crop_img[y1:y2, x1:x2].copy(),
+            bbox=clipped,
+            mask_polygon=mask_polygon,
+            mask_bitmap=mask_bitmap,
+        )
+        if seed_obj.image_all_class is None:
+            seed_obj.image_all_class = []
+        seed_obj.image_all_class.append(part)
+        context = self._current_crop_context()
+        if context is not None:
+            self._after_manual_annotation_change(context[0], seeding_idx=context[1])
+
+    def _commit_seedling_bbox(
+        self,
+        page_index: int,
+        obj: ObjectImage,
+        *,
+        auto_segment: bool = False,
+    ) -> None:
+        if page_index >= len(self.image_storage.images) or not obj.bbox:
+            return
+        page_img = self.image_storage.images[page_index]
+        height, width = page_img.shape[:2]
+        clipped = clip_bbox_to_image(obj.bbox, width, height)
+        if clipped is None:
+            return
+        obj.bbox = clipped
+        x1, y1, x2, y2 = clipped
+        obj.image = [page_img[y1:y2, x1:x2].copy()]
+        obj.image_all_class = None
+        self._after_manual_annotation_change(page_index)
+        if auto_segment:
+            try:
+                object_index = self._current_page_objects(page_index).index(obj)
+            except ValueError:
+                return
+            self._segment_single_seedling(page_index, object_index, obj)
+
+    def _commit_part_bbox(self, part: AllClassImage) -> None:
+        context = self._current_crop_context()
+        if context is None or not part.bbox:
+            return
+        page_index, seeding_idx, seed_obj = context
+        if not seed_obj.image:
+            return
+        crop_img = seed_obj.image[0]
+        height, width = crop_img.shape[:2]
+        clipped = clip_bbox_to_image(part.bbox, width, height)
+        if clipped is None:
+            return
+        part.bbox = clipped
+        x1, y1, x2, y2 = clipped
+        part.image = crop_img[y1:y2, x1:x2].copy()
+        part.mask_polygon, part.mask_bitmap = self._rect_mask_for_bbox(crop_img, clipped)
+        self._after_manual_annotation_change(page_index, seeding_idx=seeding_idx)
+
+    def _after_manual_annotation_change(
+        self,
+        page_index: int,
+        *,
+        seeding_idx: int | None = None,
+    ) -> None:
+        self._refresh_tree()
+        self._refresh_statistics_panel()
+        self.display_image_with_boxes(page_index, seeding_idx, preserve_view=True)
+        self._auto_save_session()
+
+    def _selected_annotation_object(self):
+        for item in self.graphics_scene.selectedItems():
+            if isinstance(item, BBoxItem):
+                return item.obj
+        item = self.tree_widget.currentItem()
+        payload = item.data(0, Qt.UserRole) if item is not None else None
+        if not payload:
+            return None
+        item_type = payload.get("type")
+        if item_type == "seeding" and self.image_storage.class_object_image:
+            objects = self.image_storage.class_object_image[int(payload["parent_index"])]
+            return objects[int(payload["index"])]
+        if item_type == "class" and self.image_storage.class_object_image:
+            objects = self.image_storage.class_object_image[int(payload["parent_index"])]
+            seed_obj = objects[int(payload["seeding_index"])]
+            return (seed_obj, seed_obj.image_all_class[int(payload["class_index"])])
+        return None
+
+    def _delete_selected_annotation(self) -> None:
+        selected = self._selected_annotation_object()
+        if selected is None:
+            self.statusBar().showMessage("Выберите bbox для удаления.", 2500)
+            return
+        reply = QMessageBox.question(
+            self,
+            "Удаление аннотации",
+            "Удалить выбранную аннотацию?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        if isinstance(selected, tuple):
+            seed_obj, part = selected
+            if seed_obj.image_all_class and part in seed_obj.image_all_class:
+                seed_obj.image_all_class.remove(part)
+                context = self._current_crop_context()
+                page_index = context[0] if context is not None else self._active_image_index
+                seeding_idx = context[1] if context is not None else None
+                self._after_manual_annotation_change(page_index, seeding_idx=seeding_idx)
+                self.statusBar().showMessage("Часть растения удалена.", 2500)
+            return
+        if isinstance(selected, AllClassImage) and self.image_storage.class_object_image:
+            for page_index, objects in enumerate(self.image_storage.class_object_image):
+                for seeding_idx, seed_obj in enumerate(objects):
+                    if seed_obj.image_all_class and selected in seed_obj.image_all_class:
+                        seed_obj.image_all_class.remove(selected)
+                        self._after_manual_annotation_change(
+                            page_index,
+                            seeding_idx=seeding_idx,
+                        )
+                        self.statusBar().showMessage("Часть растения удалена.", 2500)
+                        return
+        if not isinstance(selected, ObjectImage) or not self.image_storage.class_object_image:
+            return
+        for page_index, objects in enumerate(self.image_storage.class_object_image):
+            if selected in objects:
+                objects.remove(selected)
+                self._after_manual_annotation_change(page_index)
+                self.statusBar().showMessage("Сеянец удалён.", 2500)
+                return
 
     def _seedling_title(self, object_index: int, obj: ObjectImage) -> str:
         """Возвращает заголовок узла сеянца для дерева слоёв."""
@@ -2783,6 +3316,54 @@ class ImageEditor(QMainWindow):
             title="Поиск сеянцев (новые)",
             on_complete=on_complete,
         )
+
+    def _segment_single_seedling(
+        self,
+        page_index: int,
+        object_index: int,
+        obj: ObjectImage,
+    ) -> None:
+        if self._analysis_is_running():
+            self.statusBar().showMessage("Анализ уже выполняется", 3000)
+            return
+        if not obj.image:
+            self._commit_seedling_bbox(page_index, obj)
+        if not obj.image:
+            self._show_info("Сегментация", "У выбранного сеянца нет crop-изображения.")
+            return
+
+        def on_complete(result) -> None:
+            processed = result["processed"]
+            self._log_action(
+                "run_analysis",
+                f"Сегментация выбранного сеянца завершена; обработано: {processed}",
+            )
+            self.statusBar().showMessage(
+                "Маска построена по новому bbox.",
+                3000,
+            )
+
+        self._start_classification_worker(
+            [(page_index, object_index, obj)],
+            title="Сегментация выбранного",
+            on_complete=on_complete,
+        )
+
+    def classify_selected(self) -> None:
+        """Runs segmentation again only for the currently selected seedling."""
+        context = self._current_crop_context()
+        if context is None:
+            payload = self.app_state.selected_item or {}
+            if payload.get("type") == "seeding" and self.image_storage.class_object_image:
+                page_index = int(payload["parent_index"])
+                object_index = int(payload["index"])
+                objects = self.image_storage.class_object_image[page_index]
+                if object_index < len(objects):
+                    context = (page_index, object_index, objects[object_index])
+        if context is None:
+            self._show_info("Сегментация", "Выберите сеянец в дереве или на холсте.")
+            return
+        self._segment_single_seedling(*context)
 
     def classify(self) -> None:
         """Классифицирует части растений в найденных объектах в фоне."""

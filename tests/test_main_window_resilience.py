@@ -3,7 +3,7 @@ import time
 
 import cv2
 import numpy as np
-from PyQt5.QtCore import QPointF, QSettings, Qt
+from PyQt5.QtCore import QPointF, QRectF, QSettings, Qt
 from PyQt5.QtWidgets import QApplication, QGraphicsItem
 
 from seeding.auth import AuthUser
@@ -582,13 +582,15 @@ def test_crop_view_renders_part_mask_overlay():
     assert window.show_boxes_button.isChecked()
     assert window.show_masks_button.isChecked()
     assert window.view_mode_button.isChecked()
-    assert not window.edit_boxes_mode_button.isEnabled()
+    assert window.edit_boxes_mode_button.isEnabled()
     assert not window.edit_masks_mode_button.isEnabled()
     assert len(window.mask_items) == 1
     assert len(window.rect_items) == 1
     assert not (
         window.rect_items[0].flags() & QGraphicsItem.ItemIsMovable
     )
+    window._set_interaction_mode("edit_boxes")
+    assert window.rect_items[0].flags() & QGraphicsItem.ItemIsMovable
 
     window.show_masks_button.setChecked(False)
     assert len(window.mask_items) == 0
@@ -596,6 +598,145 @@ def test_crop_view_renders_part_mask_overlay():
 
     window.show_boxes_button.setChecked(False)
     assert len(window.rect_items) == 0
+
+    window.close()
+    if created:
+        app.quit()
+
+
+def test_manual_seedling_bbox_commit_rebuilds_crop_and_clears_parts(monkeypatch):
+    app, created = _ensure_offscreen_qt()
+    image = np.zeros((40, 50, 3), dtype=np.uint8)
+    obj = ObjectImage(
+        class_name="seeding",
+        confidence=0.8,
+        image=[np.zeros((10, 10, 3), dtype=np.uint8)],
+        bbox=(5, 5, 15, 15),
+        image_all_class=[
+            AllClassImage(
+                class_name="root",
+                confidence=0.5,
+                image=np.zeros((3, 3, 3), dtype=np.uint8),
+                bbox=(1, 1, 4, 4),
+            )
+        ],
+    )
+    window = ImageEditor("dummy_weights.pt", "dummy_classify.pt")
+    monkeypatch.setattr(window, "_auto_save_session", lambda: None)
+    window.image_storage.images = [image]
+    window.image_storage.source_files = ["page1.png"]
+    window.image_storage.file_path = "page1.png"
+    window.image_storage.class_object_image = [[obj]]
+
+    obj.bbox = (10, 12, 30, 32)
+    window._commit_seedling_bbox(0, obj)
+
+    assert obj.bbox == (10, 12, 30, 32)
+    assert obj.image[0].shape == (20, 20, 3)
+    assert obj.image_all_class is None
+
+    window.close()
+    if created:
+        app.quit()
+
+
+def test_manual_add_part_box_appends_part(monkeypatch):
+    app, created = _ensure_offscreen_qt()
+    seed_obj = ObjectImage(
+        class_name="seeding",
+        confidence=0.9,
+        image=[np.zeros((30, 20, 3), dtype=np.uint8)],
+        bbox=(0, 0, 20, 30),
+        image_all_class=[],
+    )
+    window = ImageEditor("dummy_weights.pt", "dummy_classify.pt")
+    monkeypatch.setattr(window, "_auto_save_session", lambda: None)
+    monkeypatch.setattr(window, "_choose_annotation_class", lambda classes, title: "root")
+    window.image_storage.images = [np.zeros((40, 40, 3), dtype=np.uint8)]
+    window.image_storage.source_files = ["page1.png"]
+    window.image_storage.file_path = "page1.png"
+    window.image_storage.class_object_image = [[seed_obj]]
+    window.display_image_with_boxes(0, seeding_idx=0)
+
+    window._add_part_box(seed_obj, (2, 3, 12, 18))
+
+    assert len(seed_obj.image_all_class) == 1
+    part = seed_obj.image_all_class[0]
+    assert part.class_name == "root"
+    assert part.bbox == (2, 3, 12, 18)
+    assert part.image.shape == (15, 10, 3)
+    assert part.mask_bitmap is not None
+    assert part.mask_polygon is not None
+
+    window.close()
+    if created:
+        app.quit()
+
+
+def test_pending_seedling_box_requires_confirmation_and_starts_segmentation(monkeypatch):
+    app, created = _ensure_offscreen_qt()
+    window = ImageEditor("dummy_weights.pt", "dummy_classify.pt")
+    window.image_storage.images = [np.zeros((40, 40, 3), dtype=np.uint8)]
+    window.image_storage.source_files = ["page1.png"]
+    window.image_storage.file_path = "page1.png"
+    window.image_storage.class_object_image = [[]]
+    window.display_image_with_boxes(0)
+    monkeypatch.setattr(window, "_auto_save_session", lambda: None)
+    monkeypatch.setattr(window, "_choose_annotation_class", lambda classes, title: "cedr")
+    started = []
+
+    def fake_segment(page_index, object_index, obj):
+        started.append((page_index, object_index, obj.bbox))
+
+    monkeypatch.setattr(window, "_segment_single_seedling", fake_segment)
+
+    window._set_interaction_mode("edit_boxes")
+    window._create_pending_box(QRectF(5, 6, 12, 14))
+
+    assert len(window.image_storage.class_object_image[0]) == 0
+    assert window.confirm_box_button.isEnabled()
+
+    window._pending_box_item.setRect(QRectF(8, 9, 10, 12))
+    window._confirm_pending_box()
+
+    assert len(window.image_storage.class_object_image[0]) == 1
+    obj = window.image_storage.class_object_image[0][0]
+    assert obj.class_name == "cedr"
+    assert obj.bbox == (8, 9, 18, 21)
+    assert started == [(0, 0, (8, 9, 18, 21))]
+
+    window.close()
+    if created:
+        app.quit()
+
+
+def test_annotation_toolbar_follows_edit_mode_and_selection():
+    app, created = _ensure_offscreen_qt()
+    obj = ObjectImage(
+        class_name="seeding",
+        confidence=0.9,
+        image=[np.zeros((10, 10, 3), dtype=np.uint8)],
+        bbox=(4, 5, 14, 15),
+    )
+    window = ImageEditor("dummy_weights.pt", "dummy_classify.pt")
+    window.image_storage.images = [np.zeros((24, 24, 3), dtype=np.uint8)]
+    window.image_storage.source_files = ["page1.png"]
+    window.image_storage.file_path = "page1.png"
+    window.image_storage.class_object_image = [[obj]]
+
+    window.display_image_with_boxes(0)
+
+    assert not window.add_box_button.isEnabled()
+    assert not window.delete_annotation_button.isEnabled()
+
+    window._set_interaction_mode("edit_boxes")
+    assert window.add_box_button.isEnabled()
+    assert not window.delete_annotation_button.isEnabled()
+
+    window.rect_items[0].setSelected(True)
+    QApplication.processEvents()
+    window._update_annotation_controls()
+    assert window.delete_annotation_button.isEnabled()
 
     window.close()
     if created:
@@ -735,3 +876,54 @@ def test_calibration_restores_per_source_file(tmp_path):
     window.close()
     if created:
         app.quit()
+
+
+import pytest
+
+
+@pytest.fixture
+def fake_pixmap():
+    from PyQt5.QtGui import QPixmap
+    from PyQt5.QtWidgets import QGraphicsPixmapItem
+    pix = QPixmap(100, 100)
+    pix.fill()
+    return QGraphicsPixmapItem(pix)
+
+
+@pytest.fixture
+def main_window():
+    app, created = _ensure_offscreen_qt()
+    window = ImageEditor("dummy_weights.pt", "dummy_classify.pt")
+    yield window
+    window.close()
+    if created:
+        app.quit()
+
+
+def test_tools_stack_view_mode(main_window):
+    """В режиме Просмотр стек показывает страницу 0."""
+    main_window._set_interaction_mode("view")
+    assert main_window.tools_stack.currentIndex() == 0
+
+
+def test_tools_stack_edit_boxes_mode(main_window):
+    """В режиме Ред. боксов стек показывает страницу 1 (idle)."""
+    main_window._set_interaction_mode("edit_boxes")
+    assert main_window.tools_stack.currentIndex() == 1
+
+
+def test_tools_stack_drawing_mode(main_window, fake_pixmap):
+    """После _start_add_box_mode стек показывает страницу 2."""
+    main_window._set_interaction_mode("edit_boxes")
+    main_window._pixmap_item = fake_pixmap
+    main_window._start_add_box_mode()
+    assert main_window.tools_stack.currentIndex() == 2
+
+
+def test_tools_stack_cancel_returns_to_edit(main_window, fake_pixmap):
+    """После отмены рисования стек возвращается на страницу 1."""
+    main_window._set_interaction_mode("edit_boxes")
+    main_window._pixmap_item = fake_pixmap
+    main_window._start_add_box_mode()
+    main_window._cancel_add_box_mode()
+    assert main_window.tools_stack.currentIndex() == 1
