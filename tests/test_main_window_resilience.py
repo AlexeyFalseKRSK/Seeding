@@ -1,13 +1,15 @@
 import os
+import time
 
+import cv2
 import numpy as np
 from PyQt5.QtCore import QPointF, QSettings, Qt
-from PyQt5.QtWidgets import QGraphicsItem
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtWidgets import QApplication, QGraphicsItem
 
+from seeding.auth import AuthUser
 from seeding.config import QSETTINGS_APP, QSETTINGS_ORG
 from seeding.inference import InferenceBox, InferenceResult
-from seeding.models import AllClassImage, ObjectImage
+from seeding.models import AllClassImage, AppState, ObjectImage, OriginalImage
 from seeding.ui.main_window import ImageEditor
 
 
@@ -30,6 +32,15 @@ def _isolate_qsettings(tmp_path) -> None:
     settings.sync()
 
 
+def _wait_for_analysis(window: ImageEditor, timeout: float = 3.0) -> None:
+    deadline = time.monotonic() + timeout
+    while window._analysis_is_running() and time.monotonic() < deadline:
+        QApplication.processEvents()
+        time.sleep(0.01)
+    QApplication.processEvents()
+    assert not window._analysis_is_running()
+
+
 class _StaticBackend:
     """Заглушка backend, возвращающая заранее подготовленные результаты."""
 
@@ -41,6 +52,30 @@ class _StaticBackend:
         """Возвращает сохранённые результаты независимо от входного изображения."""
         _ = (image, conf_threshold)
         return self._results
+
+    def predict_batch(self, images, *, conf_threshold=None):
+        """Возвращает сохранённые результаты для каждого входного изображения."""
+        _ = conf_threshold
+        return [self.predict(image) for image in images]
+
+
+class _SequenceBackend:
+    """Backend stub that returns prepared results in batch call order."""
+
+    def __init__(self, batches):
+        self._batches = list(batches)
+        self.batch_sizes = []
+
+    def predict(self, image, *, conf_threshold=None):
+        _ = (image, conf_threshold)
+        return self.predict_batch([image])[0]
+
+    def predict_batch(self, images, *, conf_threshold=None):
+        _ = conf_threshold
+        self.batch_sizes.append(len(images))
+        result = self._batches[: len(images)]
+        self._batches = self._batches[len(images) :]
+        return result
 
 
 def test_append_page_keeps_storage_lists_in_sync():
@@ -134,6 +169,158 @@ def test_logout_action_emits_logout_signal():
         app.quit()
 
 
+def test_clear_project_preserves_authenticated_user():
+    app, created = _ensure_offscreen_qt()
+    user = AuthUser(id=7, login="tester")
+    window = ImageEditor("dummy_weights.pt", "dummy_classify.pt", current_user=user)
+
+    window.clear_project()
+
+    assert window.app_state.current_user_id == user.id
+
+    window.close()
+    if created:
+        app.quit()
+
+
+def test_inference_settings_loaded_from_qsettings(tmp_path):
+    app, created = _ensure_offscreen_qt()
+    _isolate_qsettings(tmp_path)
+    settings = QSettings(QSETTINGS_ORG, QSETTINGS_APP)
+    settings.setValue("analysis/yolo_device", "cpu")
+    settings.setValue("analysis/yolo_batch_size", 3)
+    settings.setValue("app/auto_save_enabled", False)
+    settings.setValue("report/output_dir", str(tmp_path))
+    settings.sync()
+
+    previous_device = os.environ.get("YOLO_DEVICE")
+    window = ImageEditor("dummy_weights.pt", "dummy_classify.pt")
+
+    assert window._analysis_device == "cpu"
+    assert window._analysis_batch_size == 3
+    assert window._auto_save_enabled is False
+    assert window._report_output_dir == str(tmp_path)
+    assert os.environ["YOLO_DEVICE"] == "cpu"
+
+    window.close()
+    if previous_device is None:
+        os.environ.pop("YOLO_DEVICE", None)
+    else:
+        os.environ["YOLO_DEVICE"] = previous_device
+    if created:
+        app.quit()
+
+
+def test_auto_save_respects_settings_toggle(monkeypatch):
+    app, created = _ensure_offscreen_qt()
+    window = ImageEditor("dummy_weights.pt", "dummy_classify.pt")
+    called = False
+
+    def fake_auto_save(*args, **kwargs):
+        nonlocal called
+        called = True
+        return True
+
+    monkeypatch.setattr("seeding.ui.main_window.auto_save_current_session", fake_auto_save)
+
+    window._auto_save_enabled = False
+    window._auto_save_session()
+    assert called is False
+
+    window._auto_save_enabled = True
+    window._auto_save_session()
+    assert called is True
+
+    window.close()
+    if created:
+        app.quit()
+
+
+def test_default_report_dir_prefers_settings_directory(tmp_path):
+    app, created = _ensure_offscreen_qt()
+    window = ImageEditor("dummy_weights.pt", "dummy_classify.pt")
+    report_dir = tmp_path / "reports"
+    report_dir.mkdir()
+    window._report_output_dir = str(report_dir)
+
+    assert window._default_report_dir() == str(report_dir)
+
+    window.close()
+    if created:
+        app.quit()
+
+
+def test_load_session_source_images_rebuilds_crops(tmp_path):
+    app, created = _ensure_offscreen_qt()
+    image = np.zeros((40, 50, 3), dtype=np.uint8)
+    image[10:30, 12:32] = (10, 120, 220)
+    source_path = str(tmp_path / "scan.png")
+    assert cv2.imwrite(source_path, image)
+
+    part = AllClassImage(
+        class_name="root",
+        confidence=0.8,
+        image=np.zeros((1, 1, 3), dtype=np.uint8),
+        bbox=(2, 3, 10, 12),
+    )
+    obj = ObjectImage(
+        class_name="seeding",
+        confidence=0.9,
+        image=[],
+        image_all_class=[part],
+        bbox=(12, 10, 32, 30),
+    )
+    state = AppState(
+        image_storage=OriginalImage(
+            file_path=source_path,
+            images=[],
+            class_object_image=[[obj]],
+        )
+    )
+    window = ImageEditor("dummy_weights.pt", "dummy_classify.pt")
+
+    missing = window._load_session_source_images(state)
+
+    assert missing is None
+    assert len(state.image_storage.images) == 1
+    assert obj.image[0].shape == (20, 20, 3)
+    assert part.image.shape == (9, 8, 3)
+
+    window.close()
+    if created:
+        app.quit()
+
+
+def test_load_session_source_images_uses_page_source_files(tmp_path):
+    app, created = _ensure_offscreen_qt()
+    first_image = np.full((8, 9, 3), 40, dtype=np.uint8)
+    second_image = np.full((10, 11, 3), 90, dtype=np.uint8)
+    first_path = str(tmp_path / "first.png")
+    second_path = str(tmp_path / "second.png")
+    assert cv2.imwrite(first_path, first_image)
+    assert cv2.imwrite(second_path, second_image)
+    state = AppState(
+        image_storage=OriginalImage(
+            file_path=first_path,
+            source_files=[first_path, second_path],
+            images=[],
+            class_object_image=[[], []],
+        )
+    )
+    window = ImageEditor("dummy_weights.pt", "dummy_classify.pt")
+
+    missing = window._load_session_source_images(state)
+
+    assert missing is None
+    assert [image.shape[:2] for image in state.image_storage.images] == [(8, 9), (10, 11)]
+    assert int(state.image_storage.images[0][0, 0, 0]) == 40
+    assert int(state.image_storage.images[1][0, 0, 0]) == 90
+
+    window.close()
+    if created:
+        app.quit()
+
+
 def test_find_seedlings_updates_tree_and_statistics():
     """Проверяет обновление дерева и статистики после детекции на странице."""
     app, created = _ensure_offscreen_qt()
@@ -155,6 +342,7 @@ def test_find_seedlings_updates_tree_and_statistics():
     )
 
     window.find_seedlings()
+    _wait_for_analysis(window)
 
     assert len(window.image_storage.class_object_image[0]) == 1
     assert window.tree_widget.topLevelItemCount() == 1
@@ -204,6 +392,7 @@ def test_classify_adds_parts_to_detected_object():
     )
 
     window.classify()
+    _wait_for_analysis(window)
 
     parts = window.image_storage.class_object_image[0][0].image_all_class
     assert parts is not None
@@ -215,6 +404,142 @@ def test_classify_adds_parts_to_detected_object():
     assert parts[0].mask_polygon.ndim == 2
     assert parts[0].mask_polygon.shape[1] == 2
     assert parts[0].mask_polygon.shape[0] >= 3
+
+    window.close()
+    if created:
+        app.quit()
+
+
+def test_classify_batches_multiple_objects_preserving_order():
+    """Проверяет batch-сегментацию нескольких объектов без смешивания результатов."""
+    app, created = _ensure_offscreen_qt()
+    window = ImageEditor("dummy_weights.pt", "dummy_classify.pt")
+    window.image_storage.images = [np.zeros((40, 40, 3), dtype=np.uint8)]
+    window.image_storage.source_files = ["page1.png"]
+    window.image_storage.file_path = "page1.png"
+    window.image_storage.class_object_image = [
+        [
+            ObjectImage(
+                class_name="seeding",
+                confidence=0.9,
+                image=[np.zeros((20, 12, 3), dtype=np.uint8)],
+                bbox=(1, 1, 13, 21),
+            ),
+            ObjectImage(
+                class_name="seeding",
+                confidence=0.8,
+                image=[np.zeros((20, 12, 3), dtype=np.uint8)],
+                bbox=(20, 1, 32, 21),
+            ),
+        ]
+    ]
+    window.classify_model = _SequenceBackend(
+        [
+            [
+                InferenceResult(
+                    names={0: "root"},
+                    boxes=[
+                        InferenceBox(
+                            cls=0,
+                            conf=0.7,
+                            bbox_xyxy=(1.0, 12.0, 8.0, 18.0),
+                            mask_polygon=np.array(
+                                [[1.0, 12.0], [8.0, 12.0], [8.0, 18.0]],
+                                dtype=np.float32,
+                            ),
+                        )
+                    ],
+                )
+            ],
+            [
+                InferenceResult(
+                    names={0: "flower"},
+                    boxes=[
+                        InferenceBox(
+                            cls=0,
+                            conf=0.6,
+                            bbox_xyxy=(2.0, 2.0, 9.0, 8.0),
+                            mask_polygon=np.array(
+                                [[2.0, 2.0], [9.0, 2.0], [9.0, 8.0]],
+                                dtype=np.float32,
+                            ),
+                        )
+                    ],
+                )
+            ],
+        ]
+    )
+
+    window.classify()
+    _wait_for_analysis(window)
+
+    objects = window.image_storage.class_object_image[0]
+    assert objects[0].image_all_class[0].class_name == "root"
+    assert objects[1].image_all_class[0].class_name == "flower"
+    assert window.classify_model.batch_sizes == [2]
+
+    window.close()
+    if created:
+        app.quit()
+
+
+def test_classify_repredicts_rotated_objects_in_batch():
+    """Проверяет, что повернутые кропы получают финальный batch-прогон."""
+    app, created = _ensure_offscreen_qt()
+    window = ImageEditor("dummy_weights.pt", "dummy_classify.pt")
+    window.image_storage.images = [np.zeros((40, 40, 3), dtype=np.uint8)]
+    window.image_storage.source_files = ["page1.png"]
+    window.image_storage.file_path = "page1.png"
+    window.image_storage.class_object_image = [
+        [
+            ObjectImage(
+                class_name="seeding",
+                confidence=0.9,
+                image=[np.zeros((20, 12, 3), dtype=np.uint8)],
+                bbox=(1, 1, 13, 21),
+            )
+        ]
+    ]
+    window.classify_model = _SequenceBackend(
+        [
+            [
+                InferenceResult(
+                    names={0: "root"},
+                    boxes=[
+                        InferenceBox(
+                            cls=0,
+                            conf=0.7,
+                            bbox_xyxy=(1.0, 1.0, 8.0, 5.0),
+                        )
+                    ],
+                )
+            ],
+            [
+                InferenceResult(
+                    names={0: "flower"},
+                    boxes=[
+                        InferenceBox(
+                            cls=0,
+                            conf=0.6,
+                            bbox_xyxy=(2.0, 12.0, 9.0, 18.0),
+                            mask_polygon=np.array(
+                                [[2.0, 12.0], [9.0, 12.0], [9.0, 18.0]],
+                                dtype=np.float32,
+                            ),
+                        )
+                    ],
+                )
+            ],
+        ]
+    )
+
+    window.classify()
+    _wait_for_analysis(window)
+
+    obj = window.image_storage.class_object_image[0][0]
+    assert obj.rotation_k == 2
+    assert obj.image_all_class[0].class_name == "flower"
+    assert window.classify_model.batch_sizes == [1, 1]
 
     window.close()
     if created:

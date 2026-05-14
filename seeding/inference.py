@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import logging
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+_TORCH_THREADS_CONFIGURED = False
+logger = logging.getLogger(__name__)
 
 
 def infer_backend_kind(model_path: str | Path) -> str:
@@ -25,7 +30,7 @@ class _TensorAdapter:
         """Сохраняет набор числовых значений в виде массива NumPy."""
         self._values = np.asarray(values, dtype=float)
 
-    def cpu(self) -> "_TensorAdapter":
+    def cpu(self) -> _TensorAdapter:
         """Возвращает сам адаптер для совместимости с цепочкой вызовов Ultralytics."""
         return self
 
@@ -91,12 +96,85 @@ class InferenceBackend(ABC):
     ) -> list[InferenceResult]:
         """Выполняет инференс на изображении и возвращает нормализованные результаты."""
 
+    def predict_batch(
+        self,
+        images: list[np.ndarray],
+        *,
+        conf_threshold: float | None = None,
+    ) -> list[list[InferenceResult]]:
+        """Run inference for multiple images, preserving input order."""
+        return [self.predict(image, conf_threshold=conf_threshold) for image in images]
+
 
 def _load_yolo_class():
     """Лениво импортирует класс `YOLO`, чтобы не загружать зависимость заранее."""
     from ultralytics import YOLO
 
     return YOLO
+
+
+def _configure_torch_threads() -> None:
+    """Apply optional CPU thread tuning once, if configured."""
+    global _TORCH_THREADS_CONFIGURED
+    if _TORCH_THREADS_CONFIGURED:
+        return
+    _TORCH_THREADS_CONFIGURED = True
+
+    try:
+        from seeding.config import TORCH_NUM_THREADS
+    except Exception:
+        logger.exception("Failed to read TORCH_NUM_THREADS configuration")
+        return
+
+    if TORCH_NUM_THREADS is None:
+        return
+
+    try:
+        import torch
+
+        torch.set_num_threads(int(TORCH_NUM_THREADS))
+    except Exception:
+        logger.exception("Failed to apply TORCH_NUM_THREADS=%r", TORCH_NUM_THREADS)
+        return
+
+
+def resolve_yolo_device() -> str | int:
+    """Resolve YOLO device: CUDA when available, otherwise CPU."""
+    configured = os.getenv("YOLO_DEVICE")
+    if configured is None:
+        try:
+            from seeding.config import YOLO_DEVICE
+        except Exception:
+            configured = "auto"
+        else:
+            configured = str(YOLO_DEVICE)
+    configured = str(configured).strip().lower()
+
+    try:
+        import torch
+    except Exception:
+        logger.debug("PyTorch is unavailable while resolving YOLO device", exc_info=True)
+        torch = None
+
+    if configured and configured != "auto":
+        if configured == "cpu":
+            return "cpu"
+        if torch is None or not torch.cuda.is_available():
+            return "cpu"
+        try:
+            device_index = int(configured.split(":")[-1].split(",")[0])
+        except (TypeError, ValueError):
+            device_index = 0
+        if device_index >= torch.cuda.device_count():
+            return "cpu"
+        return configured
+
+    try:
+        if torch is not None and torch.cuda.is_available() and torch.cuda.device_count() > 0:
+            return 0
+    except Exception:
+        logger.exception("Failed to inspect CUDA devices; falling back to CPU")
+    return "cpu"
 
 
 def _normalize_names_map(names: Any) -> dict[int, str]:
@@ -167,6 +245,8 @@ class TorchYoloBackend(InferenceBackend):
     def __init__(self, model_path: str | Path) -> None:
         """Загружает модель YOLO по указанному пути к весам."""
         super().__init__(model_path)
+        _configure_torch_threads()
+        self.device = resolve_yolo_device()
         yolo_class = _load_yolo_class()
         self._model = yolo_class(self.model_path)
 
@@ -180,7 +260,25 @@ class TorchYoloBackend(InferenceBackend):
         kwargs = {}
         if conf_threshold is not None:
             kwargs["conf"] = float(conf_threshold)
+        kwargs["verbose"] = False
+        kwargs["device"] = self.device
         return normalize_yolo_results(self._model(image, **kwargs))
+
+    def predict_batch(
+        self,
+        images: list[np.ndarray],
+        *,
+        conf_threshold: float | None = None,
+    ) -> list[list[InferenceResult]]:
+        """Run YOLO on a batch of images and return one normalized result list per image."""
+        if not images:
+            return []
+        kwargs = {"verbose": False}
+        if conf_threshold is not None:
+            kwargs["conf"] = float(conf_threshold)
+        kwargs["device"] = self.device
+        raw_results = self._model(images, **kwargs)
+        return [normalize_yolo_results([raw_result]) for raw_result in raw_results]
 
 
 def load_inference_backend(model_path: str | Path) -> InferenceBackend:
@@ -196,4 +294,5 @@ __all__ = [
     "infer_backend_kind",
     "load_inference_backend",
     "normalize_yolo_results",
+    "resolve_yolo_device",
 ]

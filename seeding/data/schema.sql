@@ -37,6 +37,16 @@ CREATE INDEX IF NOT EXISTS idx_session_user_id
     ON analysis_session (user_id, created_at DESC);
 
 -- ── ОБНАРУЖЕННЫЕ ПРОРОСТКИ ────────────────────────────────────
+CREATE TABLE IF NOT EXISTS session_source (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id  INTEGER NOT NULL REFERENCES analysis_session(id) ON DELETE CASCADE,
+    page_index  INTEGER NOT NULL,
+    source_path TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_session_source_session_page
+    ON session_source (session_id, page_index);
+
 CREATE TABLE IF NOT EXISTS detection (
     id                    INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id            INTEGER NOT NULL REFERENCES analysis_session(id) ON DELETE CASCADE,

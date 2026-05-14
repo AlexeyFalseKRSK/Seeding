@@ -4,14 +4,17 @@ import pytest
 
 from seeding import database
 from seeding.database import (
+    delete_analysis_session,
     fetch_detections_by_session,
     fetch_parts_by_detection,
     fetch_session_by_id,
+    fetch_session_sources,
     fetch_sessions_by_user,
     insert_analysis_session,
     insert_detection,
     insert_edit_history,
     insert_plant_part,
+    replace_session_sources,
     update_detection_bbox,
     update_plant_part,
     update_session,
@@ -36,6 +39,7 @@ def test_new_tables_exist(db_path):
     assert "detection" in tables
     assert "plant_part" in tables
     assert "edit_history" in tables
+    assert "session_source" in tables
 
 
 def test_insert_and_fetch_session(db_path):
@@ -59,6 +63,17 @@ def test_fetch_sessions_by_user(db_path):
     insert_analysis_session(user_id=user_id, source_path="/b.pdf")
     rows = fetch_sessions_by_user(user_id)
     assert len(rows) == 2
+
+
+def test_replace_and_fetch_session_sources(db_path):
+    user_id = database.insert_user("op_sources", "hash")
+    sid = insert_analysis_session(user_id=user_id, source_path="/a.pdf")
+
+    replace_session_sources(sid, ["/a.pdf", "/b.png"])
+
+    rows = fetch_session_sources(sid)
+    assert [row["source_path"] for row in rows] == ["/a.pdf", "/b.png"]
+    assert [row["page_index"] for row in rows] == [0, 1]
 
 
 def test_update_session(db_path):
@@ -89,6 +104,30 @@ def test_insert_detection_and_parts(db_path):
     parts = fetch_parts_by_detection(det_id)
     assert len(parts) == 1
     assert parts[0]["class_name"] == "root"
+
+
+def test_delete_analysis_session_cascades_detections_and_parts(db_path):
+    user_id = database.insert_user("op_delete", "hash")
+    sid = insert_analysis_session(user_id=user_id, source_path="/img.jpg")
+    replace_session_sources(sid, ["/img.jpg"])
+    det_id = insert_detection(session_id=sid, page_index=0, object_index=0)
+    insert_plant_part(detection_id=det_id, class_name="root")
+
+    assert delete_analysis_session(sid, user_id=user_id) is True
+
+    assert fetch_session_by_id(sid) is None
+    assert fetch_session_sources(sid) == []
+    assert fetch_detections_by_session(sid) == []
+    assert fetch_parts_by_detection(det_id) == []
+
+
+def test_delete_analysis_session_respects_user_id(db_path):
+    owner_id = database.insert_user("op_owner", "hash")
+    other_id = database.insert_user("op_other", "hash")
+    sid = insert_analysis_session(user_id=owner_id, source_path="/img.jpg")
+
+    assert delete_analysis_session(sid, user_id=other_id) is False
+    assert fetch_session_by_id(sid) is not None
 
 
 def test_update_detection_bbox(db_path):

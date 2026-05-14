@@ -20,4 +20,6 @@ runs/
 models/
 *.pt
 *.rar
+*.sqlite3
+seeding/data/*.sqlite3
 

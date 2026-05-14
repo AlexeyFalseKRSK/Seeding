@@ -266,6 +266,48 @@ QDialog {
     color: #d1d5db;
 }
 
+QLabel#dialogTitle {
+    color: #f3f7fb;
+    font-size: 20px;
+    font-weight: 700;
+}
+
+QLabel#emptyStateLabel {
+    color: #8b949e;
+    background: #1f2735;
+    border: 1px dashed #3a4558;
+    border-radius: 8px;
+}
+
+QTableWidget {
+    background: #1f2735;
+    alternate-background-color: #222c3a;
+    color: #d1d5db;
+    border: 1px solid #3a4558;
+    border-radius: 8px;
+    selection-background-color: #0f766e;
+    selection-color: #ffffff;
+}
+
+QTableWidget::item {
+    padding: 6px 8px;
+    border: none;
+}
+
+QTableWidget::item:selected {
+    background: #0f766e;
+    color: #ffffff;
+}
+
+QTableWidget QHeaderView::section {
+    background: #1b2230;
+    color: #9ca3af;
+    border: none;
+    border-bottom: 1px solid #334155;
+    padding: 7px 8px;
+    font-weight: 600;
+}
+
 QLineEdit,
 QTextEdit,
 QSpinBox,
@@ -306,6 +348,22 @@ QPushButton:hover {
 
 QPushButton:pressed {
     background: #1f2937;
+}
+
+QPushButton#dangerButton {
+    background: #3b2630;
+    border: 1px solid #7f1d1d;
+    color: #fecaca;
+}
+
+QPushButton#dangerButton:hover {
+    background: #5a1f28;
+}
+
+QPushButton:disabled {
+    background: #253041;
+    color: #6b7280;
+    border: 1px solid #334155;
 }
 
 QCheckBox {

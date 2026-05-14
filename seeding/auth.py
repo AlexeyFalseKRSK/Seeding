@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
 import hmac
 import os
+from dataclasses import dataclass
 
 PBKDF2_ALGORITHM = "sha256"
 PBKDF2_ITERATIONS = 120_000

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import os
-from typing import Iterable
+from collections.abc import Iterable
+from pathlib import Path
 
 
 def _normalize_path_separators(path_value: str) -> str:

@@ -70,6 +70,26 @@ def test_save_session_idempotent(db_path):
     assert row["report_path"] == "/reports/out.pdf"
 
 
+def test_save_session_update_replaces_detections(db_path):
+    user_id = database.insert_user("tester_replace", "hash")
+    state = _make_state("/data/scan.pdf", user_id)
+    session_id = save_session(state)
+
+    state.image_storage.class_object_image = [[]]
+    save_session(state)
+
+    assert database.fetch_detections_by_session(session_id) == []
+
+
+def test_save_session_requires_authorized_user(db_path):
+    user_id = database.insert_user("tester_auth", "hash")
+    state = _make_state("/data/scan.pdf", user_id)
+    state.current_user_id = None
+
+    with pytest.raises(ValueError, match="авториз|authorized|user"):
+        save_session(state)
+
+
 def test_load_session_restores_state(db_path, tmp_path):
     src = str(tmp_path / "scan.pdf")
     open(src, "w").close()
@@ -94,7 +114,25 @@ def test_load_session_missing_file(db_path):
     assert restored is not None
     assert hasattr(restored, "_missing_source")
     assert restored._missing_source == "/nonexistent/file.pdf"
-    assert restored.image_storage.source_files == []
+    assert restored.image_storage.source_files == ["/nonexistent/file.pdf"]
+
+
+def test_save_and_load_session_preserves_page_source_files(db_path):
+    user_id = database.insert_user("tester_sources", "hash")
+    state = _make_state("/data/first.png", user_id)
+    state.image_storage.images = [
+        np.zeros((10, 10, 3), dtype=np.uint8),
+        np.zeros((12, 12, 3), dtype=np.uint8),
+    ]
+    state.image_storage.source_files = ["/data/first.png", "/data/second.png"]
+    state.image_storage.class_object_image = [[], []]
+
+    session_id = save_session(state)
+    restored = load_session(session_id)
+
+    assert restored is not None
+    assert restored.image_storage.file_path == "/data/first.png"
+    assert restored.image_storage.source_files == ["/data/first.png", "/data/second.png"]
 
 
 def test_load_session_not_found(db_path):

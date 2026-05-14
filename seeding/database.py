@@ -287,6 +287,25 @@ def fetch_session_by_id(session_id: int) -> sqlite3.Row | None:
         raise DatabaseError(f"Failed to fetch session id={session_id}.") from error
 
 
+def delete_analysis_session(session_id: int, user_id: int | None = None) -> bool:
+    """Удаляет сессию анализа и связанные детекции. Возвращает True, если строка удалена."""
+    where = "id = ?"
+    values: list[int] = [session_id]
+    if user_id is not None:
+        where += " AND user_id = ?"
+        values.append(user_id)
+    try:
+        with closing(get_connection()) as conn:
+            cursor = conn.execute(
+                f"DELETE FROM analysis_session WHERE {where}",
+                values,
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+    except sqlite3.Error as error:
+        raise DatabaseError(f"Failed to delete session id={session_id}.") from error
+
+
 def fetch_sessions_by_user(user_id: int, limit: int = 50) -> list[sqlite3.Row]:
     """Возвращает последние сессии пользователя."""
     try:
@@ -302,6 +321,46 @@ def fetch_sessions_by_user(user_id: int, limit: int = 50) -> list[sqlite3.Row]:
             ).fetchall()
     except sqlite3.Error as error:
         raise DatabaseError(f"Failed to fetch sessions for user id={user_id}.") from error
+
+
+def replace_session_sources(session_id: int, source_files: list[str]) -> None:
+    """Перезаписывает список исходных файлов по страницам сессии."""
+    try:
+        with closing(get_connection()) as conn:
+            conn.execute("DELETE FROM session_source WHERE session_id = ?", (session_id,))
+            conn.executemany(
+                """
+                INSERT INTO session_source (session_id, page_index, source_path)
+                VALUES (?, ?, ?)
+                """,
+                [
+                    (session_id, page_index, source_path)
+                    for page_index, source_path in enumerate(source_files)
+                ],
+            )
+            conn.commit()
+    except sqlite3.Error as error:
+        raise DatabaseError(
+            f"Failed to replace source files for session id={session_id}."
+        ) from error
+
+
+def fetch_session_sources(session_id: int) -> list[sqlite3.Row]:
+    """Возвращает исходные файлы сессии в порядке страниц."""
+    try:
+        with closing(get_connection()) as conn:
+            return conn.execute(
+                """
+                SELECT * FROM session_source
+                WHERE session_id = ?
+                ORDER BY page_index
+                """,
+                (session_id,),
+            ).fetchall()
+    except sqlite3.Error as error:
+        raise DatabaseError(
+            f"Failed to fetch source files for session id={session_id}."
+        ) from error
 
 
 def update_session(
@@ -387,6 +446,18 @@ def fetch_detections_by_session(session_id: int) -> list[sqlite3.Row]:
     except sqlite3.Error as error:
         raise DatabaseError(
             f"Failed to fetch detections for session id={session_id}."
+        ) from error
+
+
+def delete_detections_by_session(session_id: int) -> None:
+    """Удаляет все детекции сессии; связанные части удаляются каскадно."""
+    try:
+        with closing(get_connection()) as conn:
+            conn.execute("DELETE FROM detection WHERE session_id = ?", (session_id,))
+            conn.commit()
+    except sqlite3.Error as error:
+        raise DatabaseError(
+            f"Failed to delete detections for session id={session_id}."
         ) from error
 
 

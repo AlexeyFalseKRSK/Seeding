@@ -13,6 +13,10 @@ from seeding.models import AllClassImage, AppState, ObjectImage, OriginalImage
 def save_session(state: AppState) -> int:
     """Сохраняет или обновляет текущую сессию. Возвращает session_id."""
     orig = state.image_storage
+    if state.current_user_id is None:
+        raise ValueError("Нельзя сохранить сессию: пользователь не авторизован.")
+    if not orig.file_path:
+        raise ValueError("Нельзя сохранить сессию: не выбран исходный файл.")
 
     if state.session_id is None:
         session_id = database.insert_analysis_session(
@@ -23,13 +27,19 @@ def save_session(state: AppState) -> int:
             report_path=state.last_report_path or None,
         )
         state.session_id = session_id
-        _insert_all_detections(session_id, orig)
     else:
         database.update_session(
             session_id=state.session_id,
             calibration_ppm=state.pixels_per_mm or None,
             report_path=state.last_report_path or None,
         )
+        database.delete_detections_by_session(state.session_id)
+
+    source_files = list(orig.source_files or [])
+    if len(source_files) < len(orig.images):
+        source_files.extend([orig.file_path] * (len(orig.images) - len(source_files)))
+    database.replace_session_sources(state.session_id, source_files[: len(orig.images)])
+    _insert_all_detections(state.session_id, orig)
 
     return state.session_id
 
@@ -68,7 +78,13 @@ def load_session(session_id: int) -> AppState | None:
         return None
 
     source_path = row["source_path"]
-    file_exists = Path(source_path).exists()
+    source_rows = database.fetch_session_sources(session_id)
+    if source_rows:
+        source_files = [source["source_path"] for source in source_rows]
+    else:
+        page_count = int(row["page_count"] or 0)
+        source_files = [source_path for _ in range(max(1, page_count))]
+    missing_sources = [path for path in source_files if not Path(path).exists()]
 
     detections = database.fetch_detections_by_session(session_id)
 
@@ -91,7 +107,7 @@ def load_session(session_id: int) -> AppState | None:
 
     orig = OriginalImage(
         file_path=source_path,
-        source_files=[source_path] if file_exists else [],
+        source_files=source_files,
         images=[],
         class_object_image=page_list,
     )
@@ -104,8 +120,8 @@ def load_session(session_id: int) -> AppState | None:
         current_user_id=row["user_id"],
     )
 
-    if not file_exists:
-        state._missing_source = source_path
+    if missing_sources:
+        state._missing_source = "\n".join(dict.fromkeys(missing_sources))
 
     return state
 

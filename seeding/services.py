@@ -6,6 +6,7 @@ import numpy as np
 
 from seeding.mask_refiner import (
     bitmap_to_polygon,
+    build_refine_context,
     polygon_to_bitmap,
     refine_mask_bitmap,
     rotate_bitmap,
@@ -360,6 +361,7 @@ def build_classified_parts(
         return []
 
     crop_height, crop_width = crop_image.shape[:2]
+    refine_context = build_refine_context(crop_image)
     parts: list[AllClassImage] = []
     for result in results:
         for box in result.boxes:
@@ -394,7 +396,9 @@ def build_classified_parts(
                 mask_polygon, crop_height, crop_width
             )
             if coarse_bitmap is not None:
-                refined_bitmap = refine_mask_bitmap(crop_image, coarse_bitmap)
+                refined_bitmap = refine_mask_bitmap(
+                    crop_image, coarse_bitmap, refine_context
+                )
                 if refined_bitmap is not None:
                     mask_bitmap = refined_bitmap
                     # Обновляем полигон как наибольший контур уточнённой маски
