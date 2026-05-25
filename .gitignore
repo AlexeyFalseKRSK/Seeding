@@ -1,15 +1,27 @@
 .idea/
 .pytest_cache/
 .venv/
+.mcp-logs/
+.mcp.json
+.vscode/
 __pycache__/
 *.pyc
 .coverage
 coverage.xml
+pytest_result.txt
+test_output.txt
 ~$*
 ~WRL*.tmp
 *.bak
 *.bkp
 .claude/
+seeding.egg-info/
+CLAUDE.md
+CHANGELOG.md
+docs/
+scripts/
+tools/
+package-lock.json
 
 # Local data, trained weights, and generated experiment outputs.
 # Keep them on disk, but do not put them in normal git commits.
@@ -17,7 +29,6 @@ dataset/
 Photo/
 results/
 runs/
-models/
 *.pt
 *.rar
 *.sqlite3
