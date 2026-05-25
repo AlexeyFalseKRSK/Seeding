@@ -227,6 +227,22 @@ def test_save_load_and_restore_preserves_part_bitmap_mask(db_path, tmp_path):
     assert np.array_equal(restored_part.image, original[3:6, 5:8])
 
 
+def test_save_and_load_session_preserves_manual_flags(db_path):
+    user_id = database.insert_user("tester_manual_flags", "hash")
+    state = _make_state("/data/manual.png", user_id)
+    obj = state.image_storage.class_object_image[0][0]
+    obj.manual = True
+    obj.image_all_class[0].manual = True
+
+    session_id = save_session(state)
+    restored = load_session(session_id)
+
+    assert restored is not None
+    restored_obj = restored.image_storage.class_object_image[0][0]
+    assert restored_obj.manual is True
+    assert restored_obj.image_all_class[0].manual is True
+
+
 def test_load_session_not_found(db_path):
     result = load_session(99999)
     assert result is None

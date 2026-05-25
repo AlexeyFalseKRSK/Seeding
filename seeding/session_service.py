@@ -65,6 +65,7 @@ def _insert_all_detections(session_id: int, orig: OriginalImage) -> None:
                 confidence=obj.confidence,
                 rotation_deg=float(obj.rotation_k) * 90,
                 orientation_uncertain=obj.orientation_uncertain,
+                is_manual=obj.manual,
             )
             for part in obj.image_all_class or []:
                 polygon_json = None
@@ -77,6 +78,7 @@ def _insert_all_detections(session_id: int, orig: OriginalImage) -> None:
                     bbox=part.bbox,
                     polygon_json=polygon_json,
                     mask_bitmap=_encode_mask_bitmap(part.mask_bitmap),
+                    is_manual=part.manual,
                 )
 
 
@@ -114,6 +116,7 @@ def load_session(session_id: int) -> AppState | None:
             bbox=_bbox_from_row(det),
             rotation_k=int((det["rotation_deg"] or 0) / 90) % 4,
             orientation_uncertain=bool(det["orientation_uncertain"]),
+            manual=bool(det["is_manual"]),
         )
         pages.setdefault(det["page_index"], []).append(obj)
 
@@ -171,6 +174,7 @@ def _row_to_part(row) -> AllClassImage:
         bbox=_bbox_from_row(row),
         mask_polygon=polygon,
         mask_bitmap=_decode_mask_bitmap(row["mask_bitmap"]),
+        manual=bool(row["is_manual"]),
     )
 
 
