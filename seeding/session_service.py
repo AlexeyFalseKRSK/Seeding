@@ -38,7 +38,14 @@ def save_session(state: AppState) -> int:
     source_files = list(orig.source_files or [])
     if len(source_files) < len(orig.images):
         source_files.extend([orig.file_path] * (len(orig.images) - len(source_files)))
-    database.replace_session_sources(state.session_id, source_files[: len(orig.images)])
+    page_rotation_k = list(orig.page_rotation_k or [])
+    if len(page_rotation_k) < len(orig.images):
+        page_rotation_k.extend([0] * (len(orig.images) - len(page_rotation_k)))
+    database.replace_session_sources(
+        state.session_id,
+        source_files[: len(orig.images)],
+        page_rotation_k[: len(orig.images)],
+    )
     _insert_all_detections(state.session_id, orig)
 
     return state.session_id
@@ -81,9 +88,14 @@ def load_session(session_id: int) -> AppState | None:
     source_rows = database.fetch_session_sources(session_id)
     if source_rows:
         source_files = [source["source_path"] for source in source_rows]
+        page_rotation_k = [
+            int(round(float(source["rotation_deg"] or 0.0) / 90.0)) % 4
+            for source in source_rows
+        ]
     else:
         page_count = int(row["page_count"] or 0)
         source_files = [source_path for _ in range(max(1, page_count))]
+        page_rotation_k = [0 for _ in source_files]
     missing_sources = [path for path in source_files if not Path(path).exists()]
 
     detections = database.fetch_detections_by_session(session_id)
@@ -110,6 +122,7 @@ def load_session(session_id: int) -> AppState | None:
         source_files=source_files,
         images=[],
         class_object_image=page_list,
+        page_rotation_k=page_rotation_k,
     )
 
     state = AppState(

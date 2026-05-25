@@ -100,9 +100,21 @@ def initialize_database() -> None:
     try:
         with closing(get_connection()) as connection:
             connection.executescript(schema_sql)
+            _migrate_schema(connection)
             connection.commit()
     except sqlite3.Error as error:
         raise DatabaseError("Failed to initialize the SQLite schema.") from error
+
+
+def _migrate_schema(connection: sqlite3.Connection) -> None:
+    columns = {
+        str(row["name"])
+        for row in connection.execute("PRAGMA table_info(session_source)").fetchall()
+    }
+    if "rotation_deg" not in columns:
+        connection.execute(
+            "ALTER TABLE session_source ADD COLUMN rotation_deg REAL NOT NULL DEFAULT 0"
+        )
 
 
 def fetch_user_by_login(login: str) -> sqlite3.Row | None:
@@ -323,18 +335,33 @@ def fetch_sessions_by_user(user_id: int, limit: int = 50) -> list[sqlite3.Row]:
         raise DatabaseError(f"Failed to fetch sessions for user id={user_id}.") from error
 
 
-def replace_session_sources(session_id: int, source_files: list[str]) -> None:
+def replace_session_sources(
+    session_id: int,
+    source_files: list[str],
+    page_rotation_k: list[int] | None = None,
+) -> None:
     """Перезаписывает список исходных файлов по страницам сессии."""
+    rotations = list(page_rotation_k or [])
     try:
         with closing(get_connection()) as conn:
             conn.execute("DELETE FROM session_source WHERE session_id = ?", (session_id,))
             conn.executemany(
                 """
-                INSERT INTO session_source (session_id, page_index, source_path)
-                VALUES (?, ?, ?)
+                INSERT INTO session_source (session_id, page_index, source_path, rotation_deg)
+                VALUES (?, ?, ?, ?)
                 """,
                 [
-                    (session_id, page_index, source_path)
+                    (
+                        session_id,
+                        page_index,
+                        source_path,
+                        float(
+                            rotations[page_index]
+                            if page_index < len(rotations)
+                            else 0
+                        )
+                        * 90.0,
+                    )
                     for page_index, source_path in enumerate(source_files)
                 ],
             )

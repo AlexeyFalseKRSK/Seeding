@@ -112,6 +112,12 @@ def rotate_page(
         angle,
     )
     image_storage.images[page_index] = rotated_image
+    while len(image_storage.page_rotation_k) < len(image_storage.images):
+        image_storage.page_rotation_k.append(0)
+    quarter_turns = int(round(angle / 90.0))
+    image_storage.page_rotation_k[page_index] = (
+        image_storage.page_rotation_k[page_index] + quarter_turns
+    ) % 4
 
     for mapped_idx, obj_idx in enumerate(object_map):
         page_objects[obj_idx].bbox = rotated_boxes[mapped_idx]

@@ -40,6 +40,7 @@ class BBoxItem(QGraphicsRectItem):
         parent: QGraphicsItem | None = None,
         offset=(0, 0),
         bbox_update_callback=None,
+        bbox_commit_callback=None,
         class_label: str | None = None,
         pixels_per_mm: float = 0.0,
     ):
@@ -55,6 +56,7 @@ class BBoxItem(QGraphicsRectItem):
         self.obj = obj
         self.offset = offset
         self._bbox_update_callback = bbox_update_callback
+        self._bbox_commit_callback = bbox_commit_callback
         self._class_label = (
             str(class_label).strip()
             if class_label is not None
@@ -142,6 +144,8 @@ class BBoxItem(QGraphicsRectItem):
         if self._editable:
             self._update_handles()
             self.update_bbox()
+            if self._bbox_commit_callback is not None:
+                self._bbox_commit_callback(self.obj)
 
     def mouseReleaseEvent(self, event):
         """Завершает операцию редактирования и фиксирует новые координаты."""

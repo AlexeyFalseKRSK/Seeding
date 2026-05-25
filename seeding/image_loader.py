@@ -85,9 +85,10 @@ def restore_session_source_images(state: AppState) -> str | None:
         return "\n".join(dict.fromkeys(missing))
 
     loaded: list[np.ndarray] = []
+    page_rotation_k = list(state.image_storage.page_rotation_k or [])
     cache: dict[str, list[np.ndarray]] = {}
     cursor_by_source: dict[str, int] = {}
-    for page_source in source_files:
+    for page_index, page_source in enumerate(source_files):
         if page_source not in cache:
             cache[page_source] = load_source_file_images(page_source)
             cursor_by_source[page_source] = 0
@@ -95,7 +96,11 @@ def restore_session_source_images(state: AppState) -> str | None:
         page_cursor = cursor_by_source[page_source]
         if page_cursor >= len(page_images):
             return page_source
-        loaded.append(page_images[page_cursor])
+        image = page_images[page_cursor]
+        rotation_k = page_rotation_k[page_index] if page_index < len(page_rotation_k) else 0
+        if rotation_k:
+            image = np.rot90(image, k=rotation_k)
+        loaded.append(image)
         cursor_by_source[page_source] = page_cursor + 1
 
     if not loaded:
@@ -103,6 +108,10 @@ def restore_session_source_images(state: AppState) -> str | None:
 
     state.image_storage.images = loaded
     state.image_storage.source_files = source_files[: len(loaded)]
+    state.image_storage.page_rotation_k = [
+        page_rotation_k[index] if index < len(page_rotation_k) else 0
+        for index in range(len(loaded))
+    ]
     if state.image_storage.class_object_image is None:
         state.image_storage.class_object_image = []
     while len(state.image_storage.class_object_image) < len(loaded):

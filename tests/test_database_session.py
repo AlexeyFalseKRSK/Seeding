@@ -1,4 +1,5 @@
 import os
+import sqlite3
 
 import pytest
 
@@ -40,6 +41,34 @@ def test_new_tables_exist(db_path):
     assert "plant_part" in tables
     assert "edit_history" in tables
     assert "session_source" in tables
+
+
+def test_initialize_database_migrates_legacy_session_source(tmp_path):
+    path = tmp_path / "legacy.sqlite3"
+    os.environ["SEEDING_DB_PATH"] = str(path)
+    try:
+        with sqlite3.connect(path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE session_source (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id INTEGER NOT NULL,
+                    page_index INTEGER NOT NULL,
+                    source_path TEXT NOT NULL
+                )
+                """
+            )
+
+        database.initialize_database()
+
+        with database.get_connection() as conn:
+            columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(session_source)").fetchall()
+            }
+        assert "rotation_deg" in columns
+    finally:
+        del os.environ["SEEDING_DB_PATH"]
 
 
 def test_insert_and_fetch_session(db_path):

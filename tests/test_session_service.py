@@ -4,7 +4,9 @@ import numpy as np
 import pytest
 
 from seeding import database
+from seeding.image_loader import restore_session_source_images
 from seeding.models import AllClassImage, AppState, ObjectImage, OriginalImage
+from seeding.services import rotate_page
 from seeding.session_service import load_session, record_edit, save_session
 
 
@@ -133,6 +135,48 @@ def test_save_and_load_session_preserves_page_source_files(db_path):
     assert restored is not None
     assert restored.image_storage.file_path == "/data/first.png"
     assert restored.image_storage.source_files == ["/data/first.png", "/data/second.png"]
+
+
+def test_save_load_and_restore_preserves_page_rotation(db_path, tmp_path):
+    cv2 = pytest.importorskip("cv2")
+    user_id = database.insert_user("tester_rotation", "hash")
+    source = tmp_path / "rotated-source.png"
+    original = np.zeros((4, 6, 3), dtype=np.uint8)
+    original[1:3, 2:5] = (10, 80, 200)
+    assert cv2.imwrite(str(source), original)
+
+    obj = ObjectImage(
+        class_name="seeding",
+        confidence=0.95,
+        image=[original[1:3, 2:5].copy()],
+        bbox=(2, 1, 5, 3),
+    )
+    state = AppState(
+        image_storage=OriginalImage(
+            file_path=str(source),
+            source_files=[str(source)],
+            images=[original.copy()],
+            class_object_image=[[obj]],
+        ),
+        pixels_per_mm=11.0,
+        current_user_id=user_id,
+    )
+    rotated = rotate_page(state.image_storage, 0, angle=90, rotate_k=-1)
+    rotated_bbox = obj.bbox
+
+    session_id = save_session(state)
+    restored = load_session(session_id)
+    assert restored is not None
+    assert restored.image_storage.page_rotation_k == [1]
+
+    missing = restore_session_source_images(restored)
+
+    assert missing is None
+    assert np.array_equal(restored.image_storage.images[0], rotated)
+    restored_obj = restored.image_storage.class_object_image[0][0]
+    assert restored_obj.bbox == rotated_bbox
+    x1, y1, x2, y2 = rotated_bbox
+    assert np.array_equal(restored_obj.image[0], rotated[y1:y2, x1:x2])
 
 
 def test_load_session_not_found(db_path):

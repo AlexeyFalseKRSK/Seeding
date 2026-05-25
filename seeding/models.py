@@ -50,6 +50,7 @@ class OriginalImage:
     source_files: list[str] = field(default_factory=list)
     images: list[np.ndarray | Image.Image] = field(default_factory=list)
     class_object_image: list[list[ObjectImage]] | None = None
+    page_rotation_k: list[int] = field(default_factory=list)
 
 
 class SelectionPayload(TypedDict, total=False):

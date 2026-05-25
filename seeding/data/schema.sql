@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS session_source (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id  INTEGER NOT NULL REFERENCES analysis_session(id) ON DELETE CASCADE,
     page_index  INTEGER NOT NULL,
-    source_path TEXT NOT NULL
+    source_path TEXT NOT NULL,
+    rotation_deg REAL NOT NULL DEFAULT 0
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_session_source_session_page
