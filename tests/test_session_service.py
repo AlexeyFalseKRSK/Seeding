@@ -179,6 +179,54 @@ def test_save_load_and_restore_preserves_page_rotation(db_path, tmp_path):
     assert np.array_equal(restored_obj.image[0], rotated[y1:y2, x1:x2])
 
 
+def test_save_load_and_restore_preserves_part_bitmap_mask(db_path, tmp_path):
+    cv2 = pytest.importorskip("cv2")
+    user_id = database.insert_user("tester_mask_bitmap", "hash")
+    source = tmp_path / "mask-source.png"
+    original = np.zeros((8, 10, 3), dtype=np.uint8)
+    original[2:7, 3:9] = (20, 120, 80)
+    assert cv2.imwrite(str(source), original)
+
+    mask_bitmap = np.zeros((5, 6), dtype=np.uint8)
+    mask_bitmap[1:4, 2:5] = 255
+    part = AllClassImage(
+        class_name="root",
+        confidence=0.87,
+        image=original[3:6, 5:8].copy(),
+        bbox=(2, 1, 5, 4),
+        mask_polygon=np.array([[2, 1], [5, 1], [5, 4], [2, 4]], dtype=np.float32),
+        mask_bitmap=mask_bitmap,
+    )
+    obj = ObjectImage(
+        class_name="seeding",
+        confidence=0.95,
+        image=[original[2:7, 3:9].copy()],
+        image_all_class=[part],
+        bbox=(3, 2, 9, 7),
+    )
+    state = AppState(
+        image_storage=OriginalImage(
+            file_path=str(source),
+            source_files=[str(source)],
+            images=[original.copy()],
+            class_object_image=[[obj]],
+        ),
+        current_user_id=user_id,
+    )
+
+    session_id = save_session(state)
+    restored = load_session(session_id)
+    assert restored is not None
+
+    missing = restore_session_source_images(restored)
+
+    assert missing is None
+    restored_part = restored.image_storage.class_object_image[0][0].image_all_class[0]
+    assert restored_part.mask_bitmap is not None
+    assert np.array_equal(restored_part.mask_bitmap, mask_bitmap)
+    assert np.array_equal(restored_part.image, original[3:6, 5:8])
+
+
 def test_load_session_not_found(db_path):
     result = load_session(99999)
     assert result is None

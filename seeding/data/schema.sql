@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS plant_part (
     bbox_w       REAL,
     bbox_h       REAL,
     polygon_json TEXT,
+    mask_bitmap  BLOB,
     is_manual    INTEGER NOT NULL DEFAULT 0
 );
 

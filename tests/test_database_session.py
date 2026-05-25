@@ -71,6 +71,40 @@ def test_initialize_database_migrates_legacy_session_source(tmp_path):
         del os.environ["SEEDING_DB_PATH"]
 
 
+def test_initialize_database_migrates_legacy_plant_part(tmp_path):
+    path = tmp_path / "legacy_parts.sqlite3"
+    os.environ["SEEDING_DB_PATH"] = str(path)
+    try:
+        with sqlite3.connect(path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE plant_part (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    detection_id INTEGER NOT NULL,
+                    class_name TEXT NOT NULL,
+                    confidence REAL,
+                    bbox_x REAL,
+                    bbox_y REAL,
+                    bbox_w REAL,
+                    bbox_h REAL,
+                    polygon_json TEXT,
+                    is_manual INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+
+        database.initialize_database()
+
+        with database.get_connection() as conn:
+            columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(plant_part)").fetchall()
+            }
+        assert "mask_bitmap" in columns
+    finally:
+        del os.environ["SEEDING_DB_PATH"]
+
+
 def test_insert_and_fetch_session(db_path):
     user_id = database.insert_user("op1", "hash")
     sid = insert_analysis_session(

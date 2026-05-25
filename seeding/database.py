@@ -107,14 +107,20 @@ def initialize_database() -> None:
 
 
 def _migrate_schema(connection: sqlite3.Connection) -> None:
-    columns = {
+    source_columns = {
         str(row["name"])
         for row in connection.execute("PRAGMA table_info(session_source)").fetchall()
     }
-    if "rotation_deg" not in columns:
+    if "rotation_deg" not in source_columns:
         connection.execute(
             "ALTER TABLE session_source ADD COLUMN rotation_deg REAL NOT NULL DEFAULT 0"
         )
+    part_columns = {
+        str(row["name"])
+        for row in connection.execute("PRAGMA table_info(plant_part)").fetchall()
+    }
+    if "mask_bitmap" not in part_columns:
+        connection.execute("ALTER TABLE plant_part ADD COLUMN mask_bitmap BLOB")
 
 
 def fetch_user_by_login(login: str) -> sqlite3.Row | None:
@@ -517,6 +523,7 @@ def insert_plant_part(
     confidence: float | None = None,
     bbox: tuple[int, int, int, int] | None = None,
     polygon_json: str | None = None,
+    mask_bitmap: bytes | None = None,
     is_manual: bool = False,
 ) -> int:
     """Сохраняет часть растения и возвращает её id."""
@@ -527,11 +534,11 @@ def insert_plant_part(
                 """
                 INSERT INTO plant_part
                     (detection_id, class_name, confidence,
-                     bbox_x, bbox_y, bbox_w, bbox_h, polygon_json, is_manual)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     bbox_x, bbox_y, bbox_w, bbox_h, polygon_json, mask_bitmap, is_manual)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (detection_id, class_name, confidence,
-                 bx, by, bw, bh, polygon_json, int(is_manual)),
+                 bx, by, bw, bh, polygon_json, mask_bitmap, int(is_manual)),
             )
             conn.commit()
             return int(cursor.lastrowid)

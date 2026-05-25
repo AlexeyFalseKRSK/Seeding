@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from io import BytesIO
 from pathlib import Path
 
 import numpy as np
@@ -75,6 +76,7 @@ def _insert_all_detections(session_id: int, orig: OriginalImage) -> None:
                     confidence=part.confidence,
                     bbox=part.bbox,
                     polygon_json=polygon_json,
+                    mask_bitmap=_encode_mask_bitmap(part.mask_bitmap),
                 )
 
 
@@ -168,6 +170,7 @@ def _row_to_part(row) -> AllClassImage:
         image=np.zeros((10, 10, 3), dtype=np.uint8),
         bbox=_bbox_from_row(row),
         mask_polygon=polygon,
+        mask_bitmap=_decode_mask_bitmap(row["mask_bitmap"]),
     )
 
 
@@ -176,3 +179,18 @@ def _bbox_from_row(row) -> tuple[int, int, int, int] | None:
         return None
     return (int(row["bbox_x"]), int(row["bbox_y"]),
             int(row["bbox_w"]), int(row["bbox_h"]))
+
+
+def _encode_mask_bitmap(mask_bitmap: np.ndarray | None) -> bytes | None:
+    if mask_bitmap is None:
+        return None
+    buffer = BytesIO()
+    np.save(buffer, np.asarray(mask_bitmap, dtype=np.uint8), allow_pickle=False)
+    return buffer.getvalue()
+
+
+def _decode_mask_bitmap(payload: bytes | None) -> np.ndarray | None:
+    if payload is None:
+        return None
+    buffer = BytesIO(payload)
+    return np.load(buffer, allow_pickle=False)
