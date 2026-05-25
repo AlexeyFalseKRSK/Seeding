@@ -266,6 +266,48 @@ QDialog {
     color: #d1d5db;
 }
 
+QLabel#dialogTitle {
+    color: #f3f7fb;
+    font-size: 20px;
+    font-weight: 700;
+}
+
+QLabel#emptyStateLabel {
+    color: #8b949e;
+    background: #1f2735;
+    border: 1px dashed #3a4558;
+    border-radius: 8px;
+}
+
+QTableWidget {
+    background: #1f2735;
+    alternate-background-color: #222c3a;
+    color: #d1d5db;
+    border: 1px solid #3a4558;
+    border-radius: 8px;
+    selection-background-color: #0f766e;
+    selection-color: #ffffff;
+}
+
+QTableWidget::item {
+    padding: 6px 8px;
+    border: none;
+}
+
+QTableWidget::item:selected {
+    background: #0f766e;
+    color: #ffffff;
+}
+
+QTableWidget QHeaderView::section {
+    background: #1b2230;
+    color: #9ca3af;
+    border: none;
+    border-bottom: 1px solid #334155;
+    padding: 7px 8px;
+    font-weight: 600;
+}
+
 QLineEdit,
 QTextEdit,
 QSpinBox,
@@ -306,6 +348,22 @@ QPushButton:hover {
 
 QPushButton:pressed {
     background: #1f2937;
+}
+
+QPushButton#dangerButton {
+    background: #3b2630;
+    border: 1px solid #7f1d1d;
+    color: #fecaca;
+}
+
+QPushButton#dangerButton:hover {
+    background: #5a1f28;
+}
+
+QPushButton:disabled {
+    background: #253041;
+    color: #6b7280;
+    border: 1px solid #334155;
 }
 
 QCheckBox {
@@ -519,6 +577,65 @@ QFrame#interactionModeBar {
     background: #101926;
     border: 1px solid #2b4158;
     border-radius: 12px;
+}
+
+QToolButton#annotationToolButton,
+QToolButton#annotationDangerButton,
+QToolButton#annotationConfirmButton {
+    min-height: 32px;
+    min-width: 78px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+QToolButton#annotationToolButton {
+    background: #121f2c;
+    border: 1px solid #2c4962;
+    color: #cdd9e3;
+}
+
+QToolButton#annotationToolButton:hover {
+    background: #193047;
+    border-color: #45708f;
+    color: #edf6fb;
+}
+
+QToolButton#annotationToolButton:pressed {
+    background: #0d1722;
+}
+
+QToolButton#annotationDangerButton {
+    background: #251a22;
+    border: 1px solid #5e2d3a;
+    color: #f3c7cd;
+}
+
+QToolButton#annotationDangerButton:hover {
+    background: #3a2029;
+    border-color: #8f4050;
+    color: #ffe4e8;
+}
+
+QToolButton#annotationConfirmButton {
+    background: #123027;
+    border: 1px solid #2b8a6f;
+    color: #bdf4dd;
+}
+
+QToolButton#annotationConfirmButton:hover {
+    background: #174534;
+    border-color: #45b98f;
+    color: #edfff7;
+}
+
+QToolButton#annotationToolButton:disabled,
+QToolButton#annotationDangerButton:disabled,
+QToolButton#annotationConfirmButton:disabled {
+    background: transparent;
+    border-color: #26384a;
+    color: #5d7387;
 }
 
 QScrollArea#rightSidebarScroll {
@@ -823,4 +940,42 @@ QTabWidget#rightTabs::pane {
 
 QTabWidget#rightTabs QTabBar::tab {
     min-width: 84px;
+}
+
+/* ── Contextual tools panel ─────────────────────────────────────────── */
+
+/* Главная кнопка действия (полная ширина, акцент) */
+QPushButton#primaryToolButton {
+    background: #0e4a38;
+    border: 1px solid #1f8f6a;
+    border-radius: 8px;
+    color: #a8f0d4;
+    font-weight: 600;
+    font-size: 13px;
+    padding: 8px 12px;
+    min-height: 34px;
+}
+
+QPushButton#primaryToolButton:hover {
+    background: #145c48;
+    border-color: #2db88a;
+    color: #d4faee;
+}
+
+QPushButton#primaryToolButton:pressed {
+    background: #0a3328;
+}
+
+QPushButton#primaryToolButton:disabled {
+    background: transparent;
+    border-color: #26384a;
+    color: #5d7387;
+}
+
+/* Подсказка режима рисования */
+QLabel#drawingHint {
+    color: #7fa8c4;
+    font-style: italic;
+    font-size: 12px;
+    padding: 6px 4px;
 }

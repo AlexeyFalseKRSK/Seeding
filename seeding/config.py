@@ -19,7 +19,7 @@ DEFAULT_WEIGHTS_PATH = Path(
 DEFAULT_CLASSIFY_WEIGHTS_PATH = Path(
     os.getenv(
         "YOLO_CLASSIFY_WEIGHTS_PATH",
-        str(PROJECT_ROOT / "models" / "bestKlassSeg.pt"),
+        str(PROJECT_ROOT / "models" / "bestKlassSegFlip180.pt"),
     )
 )
 
@@ -33,10 +33,20 @@ CLASS_DISPLAY_NAMES = {
     "inflorescence": "Соцветие",
     "seeding": "Сеянец",
     "seedling": "Сеянец",
+    # составные классы новой модели
+    "flowercedr": "Соцветие Кедр",
+    "flowerpinus": "Соцветие Сосна",
+    "rootcedr": "Корень Кедр",
+    "rootpinus": "Корень Сосна",
+    "stemcedr": "Стебель Кедр",
+    "stempinus": "Стебель Сосна",
 }
 NMS_IOU_THRESHOLD = 0.4
 DETECTION_CONFIDENCE_THRESHOLD = 0.25
 DETECTION_IOU_THRESHOLD = NMS_IOU_THRESHOLD
+YOLO_BATCH_SIZE_CLASSIFY = 4
+YOLO_DEVICE = os.getenv("YOLO_DEVICE", "auto")
+TORCH_NUM_THREADS = None
 
 CONF_THRESHOLD_HIGH = 0.9
 CONF_THRESHOLD_LOW = 0.5

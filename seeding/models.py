@@ -40,6 +40,7 @@ class ObjectImage:
     image_all_class: list[AllClassImage] | None = None
     bbox: BBox | None = None
     rotation_k: int = 0
+    orientation_uncertain: bool = False
     manual: bool = False
 
 
@@ -51,6 +52,7 @@ class OriginalImage:
     source_files: list[str] = field(default_factory=list)
     images: list[np.ndarray | Image.Image] = field(default_factory=list)
     class_object_image: list[list[ObjectImage]] | None = None
+    page_rotation_k: list[int] = field(default_factory=list)
 
 
 class SelectionPayload(TypedDict, total=False):
@@ -83,6 +85,8 @@ class AppState:
     zoom_factor: float = 1.0
     pixels_per_mm: float = 0.0
     last_report_path: str = ""
+    session_id: int | None = None
+    current_user_id: int | None = None
 
 
 __all__ = [

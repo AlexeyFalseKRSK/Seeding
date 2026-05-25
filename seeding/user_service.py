@@ -2,22 +2,26 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from seeding.auth import AuthUser, hash_password, verify_password
 from seeding.database import (
     DatabaseError,
     count_users,
-    delete_user as delete_user_row,
     fetch_all_users,
     fetch_user_by_login,
-    fetch_user_logs as fetch_user_logs_rows,
     initialize_database,
     insert_user,
     insert_user_log,
     update_user_password_hash,
+)
+from seeding.database import (
+    delete_user as delete_user_row,
+)
+from seeding.database import (
+    fetch_user_logs as fetch_user_logs_rows,
 )
 
 LOGIN_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_.-]{2,49}$")

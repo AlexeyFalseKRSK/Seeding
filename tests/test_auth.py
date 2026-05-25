@@ -6,7 +6,7 @@ from PyQt5.QtWidgets import QApplication, QDialog
 
 import seeding.database as database_module
 from seeding.database import get_database_path
-from seeding.ui.login_dialog import LoginDialog, NO_USERS_MESSAGE
+from seeding.ui.login_dialog import NO_USERS_MESSAGE, LoginDialog
 from seeding.user_service import (
     DuplicateUserError,
     authenticate_user,

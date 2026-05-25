@@ -122,6 +122,7 @@ class SessionController:
         )
         window.logout_requested.connect(self._handle_logout_requested)
         window.showMaximized()
+        window.preload_models()
         self.window = window
 
     def _handle_logout_requested(self) -> None:

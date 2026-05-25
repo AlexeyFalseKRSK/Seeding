@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any
 
 import cv2
-import fitz
 import numpy as np
 from PyQt5.QtCore import (
     QEvent,
@@ -20,6 +19,7 @@ from PyQt5.QtCore import (
     QSettings,
     QSize,
     Qt,
+    QThread,
     pyqtSignal,
 )
 from PyQt5.QtGui import (
@@ -40,6 +40,7 @@ from PyQt5.QtWidgets import (
     QDialog,
     QFrame,
     QFileDialog,
+    QFrame,
     QGraphicsItem,
     QGraphicsLineItem,
     QGraphicsPathItem,
@@ -51,19 +52,20 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
     QLabel,
-    QListWidget,
-    QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QProgressBar,
     QShortcut,
     QSizePolicy,
     QSplitter,
     QStackedLayout,
+    QStackedWidget,
     QStyle,
-    QTabWidget,
     QToolBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -73,13 +75,10 @@ from seeding.mask_refiner import bitmap_to_contours
 from seeding.config import (
     CALIBRATION_PIXELS_PER_MM_DEFAULT,
     CLASS_DISPLAY_NAMES,
+    DEFAULT_CLASSIFY_WEIGHTS_PATH,
     DETECTION_CLASS_NAMES,
     DETECTION_CONFIDENCE_THRESHOLD,
     DETECTION_IOU_THRESHOLD,
-    DEFAULT_CLASSIFY_WEIGHTS_PATH,
-    PANEL_LAYERS_MAX_WIDTH,
-    PANEL_LAYERS_MIN_WIDTH,
-    PDF_RENDER_SCALE_DEFAULT,
     QSETTINGS_APP,
     QSETTINGS_ORG,
     ROTATE_ANGLE_DEG,
@@ -89,9 +88,25 @@ from seeding.config import (
     WINDOW_WIDTH,
     WINDOW_X,
     WINDOW_Y,
+    YOLO_BATCH_SIZE_CLASSIFY,
     ZOOM_FACTOR_INCREMENT,
 )
+from seeding.image_loader import (
+    ImageLoadError,
+    load_pages_from_path,
+)
 from seeding.inference import InferenceBackend, load_inference_backend
+from seeding.mask_refiner import (
+    bitmap_to_polygon,
+    build_refine_context,
+    polygon_to_bitmap,
+    refine_mask_bitmap,
+)
+
+try:
+    import torch  # noqa: F401 — загружает c10.dll в главном потоке до QThread
+except Exception:
+    pass
 from seeding.models import (
     AllClassImage,
     AppState,
@@ -101,12 +116,22 @@ from seeding.models import (
 )
 from seeding.services import (
     generate_report,
+    orient_crop_upright,
     rotate_selection,
     run_classification_for_selection,
     run_detection,
 )
+from seeding.session_service import load_session
 from seeding.ui.bbox_item import BBoxItem
 from seeding.ui.icon_manager import IconManager
+from seeding.ui.session_actions import (
+    auto_save_current_session,
+    restore_session_images,
+    save_current_session,
+    sync_current_user_to_state,
+)
+from seeding.ui.session_picker import SessionPickerDialog
+from seeding.ui.settings_dialog import AppSettingsDialog
 from seeding.ui.statistics_panel import StatisticsPanel
 from seeding.ui.thumbnails_panel import ThumbnailsPanel
 from seeding.ui.detail_panel import SeedlingDetailPanel
@@ -121,6 +146,288 @@ INPUT_FILE_FILTER = (
     "PDF Files (*.pdf);;"
     "All Files (*)"
 )
+
+
+class ModelLoaderThread(QThread):
+    """Фоновый поток для предзагрузки моделей детекции и сегментации."""
+
+    finished = pyqtSignal(object, object)
+    error = pyqtSignal(str)
+
+    def __init__(self, detect_path: str, classify_path: str, parent=None) -> None:
+        super().__init__(parent)
+        self._detect_path = detect_path
+        self._classify_path = classify_path
+
+    def run(self) -> None:
+        try:
+            detect = load_inference_backend(self._detect_path)
+            classify = load_inference_backend(self._classify_path)
+            self.finished.emit(detect, classify)
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
+class DetectionWorkerThread(QThread):
+    """Runs YOLO detection outside the UI thread and updates AppState when done."""
+
+    progress = pyqtSignal(int, int, str)
+    finished_ok = pyqtSignal(object)
+    error = pyqtSignal(str)
+
+    def __init__(
+        self,
+        model: InferenceBackend,
+        state: AppState,
+        page_indices: list[int],
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self._model = model
+        self._state = state
+        self._page_indices = list(page_indices)
+        self._cancel_requested = False
+
+    def request_cancel(self) -> None:
+        self._cancel_requested = True
+
+    def run(self) -> None:
+        try:
+            total = len(self._page_indices)
+            processed = 0
+            page_counts: dict[int, int] = {}
+            for step, page_index in enumerate(self._page_indices, start=1):
+                if self._cancel_requested:
+                    break
+                self.progress.emit(
+                    processed,
+                    total,
+                    f"Страница {page_index + 1}... ({step}/{total})",
+                )
+                image = self._state.image_storage.images[page_index]
+                results = self._model.predict(
+                    image,
+                    conf_threshold=DETECTION_CONFIDENCE_THRESHOLD,
+                )
+                objects = run_detection(
+                    self._state,
+                    page_index,
+                    results,
+                    detection_class_names=DETECTION_CLASS_NAMES,
+                    iou_threshold=DETECTION_IOU_THRESHOLD,
+                    rotate_k=ROTATE_K,
+                )
+                processed += 1
+                page_counts[page_index] = len(objects)
+                self.progress.emit(processed, total, "")
+            self.finished_ok.emit(
+                {
+                    "processed": processed,
+                    "total": total,
+                    "page_counts": page_counts,
+                    "canceled": self._cancel_requested,
+                }
+            )
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
+class ClassificationWorkerThread(QThread):
+    """Runs YOLO segmentation/classification outside the UI thread."""
+
+    progress = pyqtSignal(int, int, str)
+    finished_ok = pyqtSignal(object)
+    error = pyqtSignal(str)
+
+    def __init__(
+        self,
+        model: InferenceBackend,
+        state: AppState,
+        pending: list[tuple[int, int, ObjectImage]],
+        batch_size: int,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self._model = model
+        self._state = state
+        self._pending = list(pending)
+        self._batch_size = max(1, int(batch_size))
+        self._cancel_requested = False
+
+    def request_cancel(self) -> None:
+        self._cancel_requested = True
+
+    def run(self) -> None:
+        try:
+            processed = 0
+            total = len(self._pending)
+            for batch in self._iter_batches(self._pending, self._batch_size):
+                if self._cancel_requested:
+                    break
+
+                self.progress.emit(processed, total, f"Сеянец {processed + 1} из {total}...")
+                orient_results_batch = self._model.predict_batch(
+                    [obj.image[0] for _, _, obj in batch]
+                )
+
+                final_results_by_item: dict[int, list] = {}
+                rotated_items: list[tuple[int, ObjectImage]] = []
+                rotated_images: list[np.ndarray] = []
+                probe_items: list[tuple[int, ObjectImage]] = []
+                probe_images: list[np.ndarray] = []
+
+                for local_index, (_, _, obj) in enumerate(batch):
+                    orient_results = orient_results_batch[local_index]
+                    oriented_crop, was_rotated, uncertain = orient_crop_upright(
+                        obj.image[0], orient_results
+                    )
+                    if was_rotated:
+                        obj.image[0] = oriented_crop
+                        obj.rotation_k = (obj.rotation_k + 2) % 4
+                        rotated_items.append((local_index, obj))
+                        rotated_images.append(obj.image[0])
+                    else:
+                        final_results_by_item[local_index] = orient_results
+                    obj.orientation_uncertain = uncertain
+                    if (
+                        not was_rotated
+                        and self._orientation_needs_rotated_probe(orient_results)
+                    ):
+                        probe_items.append((local_index, obj))
+                        probe_images.append(np.rot90(obj.image[0], k=2))
+
+                if probe_images and not self._cancel_requested:
+                    probe_results_batch = self._model.predict_batch(probe_images)
+                    for probe_index, (local_index, obj) in enumerate(probe_items):
+                        if self._results_have_boxes(probe_results_batch[probe_index]):
+                            obj.image[0] = probe_images[probe_index]
+                            obj.rotation_k = (obj.rotation_k + 2) % 4
+                            rotated_items.append((local_index, obj))
+                            rotated_images.append(obj.image[0])
+                        else:
+                            final_results_by_item[local_index] = orient_results_batch[
+                                local_index
+                            ]
+
+                if rotated_images and not self._cancel_requested:
+                    rotated_results_batch = self._model.predict_batch(rotated_images)
+                    for rotated_index, (local_index, _) in enumerate(rotated_items):
+                        final_results_by_item[local_index] = rotated_results_batch[
+                            rotated_index
+                        ]
+
+                for local_index, (page_index, object_index, _) in enumerate(batch):
+                    if self._cancel_requested:
+                        break
+                    run_classification_for_selection(
+                        self._state,
+                        page_index,
+                        object_index,
+                        final_results_by_item.get(local_index, []),
+                    )
+                    processed += 1
+                    self.progress.emit(processed, total, "")
+
+            self.finished_ok.emit(
+                {
+                    "processed": processed,
+                    "total": total,
+                    "canceled": self._cancel_requested,
+                }
+            )
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+    @staticmethod
+    def _iter_batches(items, batch_size: int):
+        for start in range(0, len(items), batch_size):
+            yield items[start : start + batch_size]
+
+    @staticmethod
+    def _orientation_needs_rotated_probe(results) -> bool:
+        if not results:
+            return True
+        marker_classes = {
+            "root",
+            "rootcedr",
+            "rootpinus",
+            "flower",
+            "inflorescence",
+            "flowercedr",
+            "flowerpinus",
+        }
+        for result in results:
+            for box in result.boxes:
+                class_name = str(result.names[int(box.cls)]).lower()
+                if class_name in marker_classes:
+                    return False
+        return True
+
+    @staticmethod
+    def _results_have_boxes(results) -> bool:
+        return any(bool(result.boxes) for result in results or [])
+
+
+class AnalysisProgressDialog(QDialog):
+    """Стилизованный диалог прогресса анализа в тёмной теме приложения."""
+
+    canceled = pyqtSignal()
+
+    def __init__(self, title: str, parent=None) -> None:
+        super().__init__(parent, Qt.Dialog | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground, False)
+        self.setModal(True)
+        self.setFixedWidth(420)
+
+        self._canceled = False
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(14)
+
+        self._title_label = QLabel(title)
+        self._title_label.setProperty("progressTitle", "true")
+        font = self._title_label.font()
+        font.setPointSize(font.pointSize() + 1)
+        font.setBold(True)
+        self._title_label.setFont(font)
+        layout.addWidget(self._title_label)
+
+        self._step_label = QLabel("")
+        self._step_label.setObjectName("progressStepLabel")
+        layout.addWidget(self._step_label)
+
+        self._bar = QProgressBar()
+        self._bar.setFixedHeight(18)
+        self._bar.setTextVisible(True)
+        self._bar.setFormat("%v / %m")
+        layout.addWidget(self._bar)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        self._cancel_btn = QPushButton("Отмена")
+        self._cancel_btn.setFixedWidth(100)
+        self._cancel_btn.clicked.connect(self._on_cancel)
+        btn_row.addWidget(self._cancel_btn)
+        layout.addLayout(btn_row)
+
+    def _on_cancel(self) -> None:
+        self._canceled = True
+        self.canceled.emit()
+
+    def wasCanceled(self) -> bool:
+        return self._canceled
+
+    def setRange(self, minimum: int, maximum: int) -> None:
+        self._bar.setRange(minimum, maximum)
+
+    def setValue(self, value: int) -> None:
+        self._bar.setValue(value)
+        QApplication.processEvents()
+
+    def setStep(self, text: str) -> None:
+        self._step_label.setText(text)
+        QApplication.processEvents()
 
 
 class CanvasGraphicsView(QGraphicsView):
@@ -331,7 +638,10 @@ class ImageEditor(QMainWindow):
         self.current_user = current_user
         self.detect_model: InferenceBackend | None = None
         self.classify_model: InferenceBackend | None = None
-        self.app_state = AppState(image_storage=OriginalImage())
+        self.app_state = AppState(
+            image_storage=OriginalImage(),
+            current_user_id=current_user.id if current_user else None,
+        )
         self.image_storage = self.app_state.image_storage
         self._active_image_index = 0
         self._display_target: tuple[Any, ...] = ("page", 0)
@@ -342,6 +652,11 @@ class ImageEditor(QMainWindow):
         self._show_boxes = True
         self._show_masks = True
         self._interaction_mode = "view"
+        self._box_draw_active = False
+        self._box_draw_start: QPointF | None = None
+        self._box_draw_item: QGraphicsRectItem | None = None
+        self._pending_box_item: BBoxItem | None = None
+        self._pending_box_target: tuple[Any, ...] | None = None
         self.zoom_factor = 1.0
         self.min_fit_zoom = 1.0
         self.pixels_per_mm = CALIBRATION_PIXELS_PER_MM_DEFAULT
@@ -358,6 +673,29 @@ class ImageEditor(QMainWindow):
         self._window_drag_active = False
         self._window_drag_offset = QPoint()
         self._settings = QSettings(QSETTINGS_ORG, QSETTINGS_APP)
+        self._analysis_batch_size = self._settings.value(
+            "analysis/yolo_batch_size",
+            YOLO_BATCH_SIZE_CLASSIFY,
+            type=int,
+        )
+        self._analysis_device = self._settings.value(
+            "analysis/yolo_device",
+            os.getenv("YOLO_DEVICE", "auto"),
+            type=str,
+        ) or "auto"
+        self._auto_save_enabled = self._settings.value(
+            "app/auto_save_enabled",
+            True,
+            type=bool,
+        )
+        self._report_output_dir = self._settings.value(
+            "report/output_dir",
+            "",
+            type=str,
+        ) or ""
+        self._analysis_thread: QThread | None = None
+        self._analysis_progress: AnalysisProgressDialog | None = None
+        self._apply_inference_settings()
         self.app_state.zoom_factor = self.zoom_factor
         self.app_state.pixels_per_mm = self.pixels_per_mm
 
@@ -380,6 +718,39 @@ class ImageEditor(QMainWindow):
         )
         self.statusBar().showMessage("Откройте изображение или PDF", 3000)
 
+    def _apply_inference_settings(self) -> None:
+        """Применяет настройки инференса к окружению для новых backend-экземпляров."""
+        device = str(self._analysis_device or "auto").strip() or "auto"
+        os.environ["YOLO_DEVICE"] = device
+        self._analysis_device = device
+        self._analysis_batch_size = max(1, int(self._analysis_batch_size or 1))
+
+    def _sync_current_user_to_state(self) -> None:
+        """Гарантирует, что AppState знает текущего авторизованного пользователя."""
+        sync_current_user_to_state(self.app_state, self.current_user)
+
+    def _load_session_source_images(self, state: AppState) -> str | None:
+        """Load source images for a restored session and rebuild saved crops."""
+        return restore_session_images(state, logger=logger)
+
+    def preload_models(self) -> None:
+        """Запускает фоновую загрузку обеих моделей сразу после показа окна."""
+        self._model_loader = ModelLoaderThread(
+            self.weights_path, self.classify_weights_path, self
+        )
+        self._model_loader.finished.connect(self._on_models_loaded)
+        self._model_loader.error.connect(self._on_models_load_error)
+        self.statusBar().showMessage("Загрузка моделей…")
+        self._model_loader.start()
+
+    def _on_models_loaded(self, detect_model, classify_model) -> None:
+        self.detect_model = detect_model
+        self.classify_model = classify_model
+        self.statusBar().showMessage("Модели загружены", 3000)
+
+    def _on_models_load_error(self, error_text: str) -> None:
+        self.statusBar().showMessage("Ошибка загрузки моделей", 5000)
+        logger.error("Не удалось предзагрузить модели: %s", error_text)
     def preload_models(self) -> bool:
         """Предзагружает модели детекции и сегментации после старта окна."""
 
@@ -459,13 +830,15 @@ class ImageEditor(QMainWindow):
         self.project_count_chip.setObjectName("metricChip")
         left_layout.addWidget(self.project_count_chip, alignment=Qt.AlignLeft)
 
-        self.project_files_list = QListWidget(left_panel)
-        self.project_files_list.setObjectName("projectFilesList")
-        self.project_files_list.setMinimumHeight(240)
-        self.project_files_list.currentRowChanged.connect(
-            self._on_project_row_changed
+        self.tree_widget = LayerTreeWidget()
+        self.tree_widget.itemSelectionChanged.connect(
+            self._on_tree_selection_changed
         )
-        left_layout.addWidget(self.project_files_list, 1)
+        left_layout.addWidget(self.tree_widget, 1)
+
+        self.statistics_panel = StatisticsPanel(self)
+        self.statistics_panel.setMaximumHeight(180)
+        left_layout.addWidget(self.statistics_panel)
 
         interaction_card = QFrame(left_panel)
         interaction_card.setObjectName("imageInteractionCard")
@@ -478,19 +851,61 @@ class ImageEditor(QMainWindow):
         interaction_title.setWordWrap(True)
         interaction_layout.addWidget(interaction_title)
 
-        interaction_hint = QLabel(
-            "Управление отображением слоев на изображении.",
-            interaction_card,
+        # --- Переключатель режима (всегда виден) ---
+        mode_bar = QFrame(interaction_card)
+        mode_bar.setObjectName("interactionModeBar")
+        mode_bar_layout = QHBoxLayout(mode_bar)
+        mode_bar_layout.setContentsMargins(6, 6, 6, 6)
+        mode_bar_layout.setSpacing(6)
+
+        self.view_mode_button = QPushButton("Просмотр", mode_bar)
+        self.view_mode_button.setCheckable(True)
+        self.view_mode_button.setChecked(True)
+        self.view_mode_button.setProperty("segmented", "true")
+        self.view_mode_button.toggled.connect(
+            lambda checked: checked and self._set_interaction_mode("view")
         )
-        interaction_hint.setObjectName("panelHint")
-        interaction_hint.setWordWrap(True)
-        interaction_layout.addWidget(interaction_hint)
+        mode_bar_layout.addWidget(self.view_mode_button)
 
-        layers_title = QLabel("Отображение", interaction_card)
-        layers_title.setObjectName("panelHint")
-        interaction_layout.addWidget(layers_title)
+        self.edit_boxes_mode_button = QPushButton("Ред. боксов", mode_bar)
+        self.edit_boxes_mode_button.setCheckable(True)
+        self.edit_boxes_mode_button.setProperty("segmented", "true")
+        self.edit_boxes_mode_button.setToolTip("Редактировать и добавлять bbox.")
+        self.edit_boxes_mode_button.toggled.connect(
+            lambda checked: checked and self._set_interaction_mode("edit_boxes")
+        )
+        mode_bar_layout.addWidget(self.edit_boxes_mode_button)
 
-        toggle_bar = QFrame(interaction_card)
+        # Stub: kept for backward compatibility with tests; not shown in UI
+        self.edit_masks_mode_button = QPushButton("Ред. маски", mode_bar)
+        self.edit_masks_mode_button.setCheckable(True)
+        self.edit_masks_mode_button.setEnabled(False)
+        self.edit_masks_mode_button.setVisible(False)
+
+        self.add_box_mode_button = QPushButton("+ Бокс", mode_bar)
+        self.add_box_mode_button.setCheckable(True)
+        self.add_box_mode_button.setProperty("segmented", "true")
+        self.add_box_mode_button.setToolTip("Нарисуй прямоугольник чтобы добавить объект вручную")
+        self.add_box_mode_button.toggled.connect(self._toggle_add_box_mode)
+        mode_bar_layout.addWidget(self.add_box_mode_button)
+
+        interaction_layout.addWidget(mode_bar)
+
+        # --- Контекстный стек ---
+        self.tools_stack = QStackedWidget(interaction_card)
+        interaction_layout.addWidget(self.tools_stack)
+
+        # Страница 0: Просмотр
+        view_page = QWidget()
+        view_layout = QVBoxLayout(view_page)
+        view_layout.setContentsMargins(0, 4, 0, 0)
+        view_layout.setSpacing(6)
+
+        overlays_label = QLabel("Показ оверлеев", view_page)
+        overlays_label.setObjectName("panelHint")
+        view_layout.addWidget(overlays_label)
+
+        toggle_bar = QFrame(view_page)
         toggle_bar.setObjectName("overlayToggleBar")
         toggle_bar_layout = QHBoxLayout(toggle_bar)
         toggle_bar_layout.setContentsMargins(6, 6, 6, 6)
@@ -510,49 +925,85 @@ class ImageEditor(QMainWindow):
         self.show_masks_button.toggled.connect(self._set_show_masks)
         toggle_bar_layout.addWidget(self.show_masks_button)
 
-        interaction_layout.addWidget(toggle_bar)
+        view_layout.addWidget(toggle_bar)
+        view_layout.addStretch()
+        self.tools_stack.addWidget(view_page)  # index 0
 
-        mode_title = QLabel("Режим работы", interaction_card)
-        mode_title.setObjectName("panelHint")
-        interaction_layout.addWidget(mode_title)
+        # Страница 1: Ред. боксов (ожидание)
+        edit_page = QWidget()
+        edit_layout = QVBoxLayout(edit_page)
+        edit_layout.setContentsMargins(0, 4, 0, 0)
+        edit_layout.setSpacing(6)
 
-        mode_bar = QFrame(interaction_card)
-        mode_bar.setObjectName("interactionModeBar")
-        mode_bar_layout = QHBoxLayout(mode_bar)
-        mode_bar_layout.setContentsMargins(6, 6, 6, 6)
-        mode_bar_layout.setSpacing(6)
+        self.add_box_button = QPushButton("+ Добавить бокс", edit_page)
+        self.add_box_button.setObjectName("primaryToolButton")
+        self.add_box_button.setToolTip("Нарисовать новый bbox мышью.")
+        self.add_box_button.clicked.connect(self._start_add_box_mode)
+        edit_layout.addWidget(self.add_box_button)
 
-        self.view_mode_button = QPushButton("Просмотр", mode_bar)
-        self.view_mode_button.setCheckable(True)
-        self.view_mode_button.setChecked(True)
-        self.view_mode_button.setProperty("segmented", "true")
-        self.view_mode_button.toggled.connect(
-            lambda checked: checked and self._set_interaction_mode("view")
-        )
-        mode_bar_layout.addWidget(self.view_mode_button)
+        secondary_row = QFrame(edit_page)
+        secondary_row_layout = QHBoxLayout(secondary_row)
+        secondary_row_layout.setContentsMargins(0, 0, 0, 0)
+        secondary_row_layout.setSpacing(6)
 
-        self.edit_boxes_mode_button = QPushButton("Ред. боксов", mode_bar)
-        self.edit_boxes_mode_button.setCheckable(True)
-        self.edit_boxes_mode_button.setProperty("segmented", "true")
-        self.edit_boxes_mode_button.setEnabled(False)
-        self.edit_boxes_mode_button.setToolTip("Режим будет добавлен позже.")
-        mode_bar_layout.addWidget(self.edit_boxes_mode_button)
+        self.rerun_selected_button = QToolButton(secondary_row)
+        self.rerun_selected_button.setObjectName("annotationToolButton")
+        self.rerun_selected_button.setText("Инференс")
+        self.rerun_selected_button.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
+        self.rerun_selected_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.rerun_selected_button.setToolTip("Повторить сегментацию выбранного сеянца.")
+        self.rerun_selected_button.clicked.connect(self.classify_selected)
+        secondary_row_layout.addWidget(self.rerun_selected_button)
 
-        self.edit_masks_mode_button = QPushButton("Ред. маски", mode_bar)
-        self.edit_masks_mode_button.setCheckable(True)
-        self.edit_masks_mode_button.setProperty("segmented", "true")
-        self.edit_masks_mode_button.setEnabled(False)
-        self.edit_masks_mode_button.setToolTip("Режим будет добавлен позже.")
-        mode_bar_layout.addWidget(self.edit_masks_mode_button)
+        self.delete_annotation_button = QToolButton(secondary_row)
+        self.delete_annotation_button.setObjectName("annotationDangerButton")
+        self.delete_annotation_button.setText("Удалить")
+        self.delete_annotation_button.setIcon(self.style().standardIcon(QStyle.SP_TrashIcon))
+        self.delete_annotation_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.delete_annotation_button.setToolTip("Удалить выбранный bbox или часть.")
+        self.delete_annotation_button.clicked.connect(self._delete_selected_annotation)
+        secondary_row_layout.addWidget(self.delete_annotation_button)
 
-        self.add_box_mode_button = QPushButton("+ Бокс", mode_bar)
-        self.add_box_mode_button.setCheckable(True)
-        self.add_box_mode_button.setProperty("segmented", "true")
-        self.add_box_mode_button.setToolTip("Нарисуй прямоугольник чтобы добавить объект вручную")
-        self.add_box_mode_button.toggled.connect(self._toggle_add_box_mode)
-        mode_bar_layout.addWidget(self.add_box_mode_button)
+        edit_layout.addWidget(secondary_row)
+        edit_layout.addStretch()
+        self.tools_stack.addWidget(edit_page)  # index 1
 
-        interaction_layout.addWidget(mode_bar)
+        # Страница 2: Рисование bbox
+        drawing_page = QWidget()
+        drawing_layout = QVBoxLayout(drawing_page)
+        drawing_layout.setContentsMargins(0, 4, 0, 0)
+        drawing_layout.setSpacing(8)
+
+        self.drawing_hint_label = QLabel("✏  Нарисуйте бокс на холсте", drawing_page)
+        self.drawing_hint_label.setObjectName("drawingHint")
+        self.drawing_hint_label.setWordWrap(True)
+        drawing_layout.addWidget(self.drawing_hint_label)
+
+        confirm_row = QFrame(drawing_page)
+        confirm_row_layout = QHBoxLayout(confirm_row)
+        confirm_row_layout.setContentsMargins(0, 0, 0, 0)
+        confirm_row_layout.setSpacing(6)
+
+        self.confirm_box_button = QToolButton(confirm_row)
+        self.confirm_box_button.setObjectName("annotationConfirmButton")
+        self.confirm_box_button.setText("✓ Принять")
+        self.confirm_box_button.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self.confirm_box_button.setToolTip("Подтвердить положение нового bbox.")
+        self.confirm_box_button.clicked.connect(self._confirm_pending_box)
+        confirm_row_layout.addWidget(self.confirm_box_button)
+
+        self.cancel_box_button = QToolButton(confirm_row)
+        self.cancel_box_button.setObjectName("annotationToolButton")
+        self.cancel_box_button.setText("✗ Отменить")
+        self.cancel_box_button.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self.cancel_box_button.setToolTip("Отменить добавление bbox.")
+        self.cancel_box_button.clicked.connect(self._cancel_add_box_mode)
+        confirm_row_layout.addWidget(self.cancel_box_button)
+
+        drawing_layout.addWidget(confirm_row)
+        drawing_layout.addStretch()
+        self.tools_stack.addWidget(drawing_page)  # index 2
+
         left_layout.addWidget(interaction_card)
         splitter.addWidget(left_panel)
 
@@ -603,6 +1054,7 @@ class ImageEditor(QMainWindow):
         self.canvas_stack = QStackedLayout()
 
         self.graphics_scene = QGraphicsScene(self)
+        self.graphics_scene.selectionChanged.connect(self._update_annotation_controls)
         self.graphics_view = CanvasGraphicsView(self.graphics_scene, self)
         self.graphics_view.box_drawn.connect(self._on_box_drawn)
         self.graphics_view.draw_mode_cancelled.connect(
@@ -621,6 +1073,7 @@ class ImageEditor(QMainWindow):
         canvas_layout.addLayout(self.canvas_stack, 1)
         splitter.addWidget(self.canvas_host)
 
+        splitter.setSizes([SPLITTER_SIZES[0], SPLITTER_SIZES[1] + SPLITTER_SIZES[2]])
         right_panel = QFrame(self)
         right_panel.setObjectName("panelCard")
         right_panel.setMinimumWidth(PANEL_LAYERS_MIN_WIDTH)
@@ -662,6 +1115,7 @@ class ImageEditor(QMainWindow):
         splitter.setSizes(SPLITTER_SIZES)
         self._set_canvas_empty(True)
         self._update_canvas_status()
+        self._update_annotation_controls()
 
     def _build_empty_state(self) -> QWidget:
         """Создаёт заглушку, показываемую на холсте до открытия первого файла."""
@@ -736,7 +1190,6 @@ class ImageEditor(QMainWindow):
         """Обновляет подписи текущей страницы, масштаба и калибровки на панели статуса."""
         if not self.image_storage.images:
             self.canvas_page_label.setText("Нет открытого изображения")
-            self.sidebar_page_label.setText("Нет выбранной страницы")
             self.zoom_status_chip.setText("100%")
             self.scale_status_chip.setText("px")
             return
@@ -750,7 +1203,6 @@ class ImageEditor(QMainWindow):
             page_text = source_name
 
         self.canvas_page_label.setText(page_text)
-        self.sidebar_page_label.setText(page_text)
         self.zoom_status_chip.setText(f"{int(round(self.zoom_factor * 100))}%")
         if self.pixels_per_mm > 0:
             self.scale_status_chip.setText(f"{self.pixels_per_mm:.2f} px/мм")
@@ -899,6 +1351,38 @@ class ImageEditor(QMainWindow):
                 "Калибровка для текущего файла сброшена.",
                 3000,
             )
+
+    def _open_app_settings(self) -> None:
+        """Open inference and performance settings."""
+        dialog = AppSettingsDialog(
+            current_device=self._analysis_device,
+            current_batch_size=self._analysis_batch_size,
+            current_auto_save_enabled=self._auto_save_enabled,
+            current_report_output_dir=self._report_output_dir,
+            parent=self,
+        )
+        if dialog.exec_() != QDialog.Accepted:
+            return
+
+        selected = dialog.selected_settings()
+        self._analysis_device = selected.analysis_device
+        self._analysis_batch_size = selected.analysis_batch_size
+        self._auto_save_enabled = selected.auto_save_enabled
+        self._report_output_dir = selected.report_output_dir
+        self._settings.setValue("analysis/yolo_device", self._analysis_device)
+        self._settings.setValue("analysis/yolo_batch_size", self._analysis_batch_size)
+        self._settings.setValue("app/auto_save_enabled", self._auto_save_enabled)
+        self._settings.setValue("report/output_dir", self._report_output_dir)
+        self._settings.sync()
+        self._apply_inference_settings()
+
+        self.detect_model = None
+        self.classify_model = None
+        self.statusBar().showMessage(
+            f"Настройки применены: устройство {self._analysis_device}, batch {self._analysis_batch_size}",
+            5000,
+        )
+
 
     def _start_calibration(self) -> None:
         """Запускает интерактивную калибровку по измеренному отрезку на изображении."""
@@ -1079,6 +1563,49 @@ class ImageEditor(QMainWindow):
                     self.zoom_out(anchor_view_pos=event.pos())
                 return True
 
+            if self._box_draw_active:
+                if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                    scene_pos = self._clamp_scene_pos_to_image(
+                        self.graphics_view.mapToScene(event.pos())
+                    )
+                    if scene_pos is None:
+                        return True
+                    self._box_draw_start = scene_pos
+                    self._box_draw_item = self.graphics_scene.addRect(
+                        QRectF(scene_pos, scene_pos),
+                        QPen(QColor(255, 255, 255), 2, Qt.DashLine),
+                        QBrush(Qt.transparent),
+                    )
+                    self._box_draw_item.setZValue(5)
+                    return True
+
+                if (
+                    event.type() == QEvent.MouseMove
+                    and self._box_draw_start is not None
+                    and self._box_draw_item is not None
+                ):
+                    scene_pos = self._clamp_scene_pos_to_image(
+                        self.graphics_view.mapToScene(event.pos())
+                    )
+                    if scene_pos is not None:
+                        self._box_draw_item.setRect(
+                            QRectF(self._box_draw_start, scene_pos).normalized()
+                        )
+                    return True
+
+                if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+                    rect = (
+                        self._box_draw_item.rect().normalized()
+                        if self._box_draw_item is not None
+                        else QRectF()
+                    )
+                    self._finish_add_box(rect)
+                    return True
+
+                if event.type() == QEvent.MouseButtonPress and event.button() == Qt.RightButton:
+                    self._cancel_add_box_mode()
+                    return True
+
             if self._measure_mode:
                 if event.type() == QEvent.MouseButtonPress:
                     if event.button() == Qt.RightButton:
@@ -1119,6 +1646,14 @@ class ImageEditor(QMainWindow):
 
     def keyPressEvent(self, event) -> None:
         """Отменяет измерение по `Esc` и передаёт остальные клавиши стандартной обработке."""
+        if event.key() == Qt.Key_Delete and self._interaction_mode == "edit_boxes":
+            self._delete_selected_annotation()
+            event.accept()
+            return
+        if event.key() == Qt.Key_Escape and self._box_draw_active:
+            self._cancel_add_box_mode()
+            event.accept()
+            return
         if event.key() == Qt.Key_Escape and (
             self._measure_mode or self._measure_start_scene_pos is not None
         ):
@@ -1158,13 +1693,61 @@ class ImageEditor(QMainWindow):
         if mode not in {"view", "edit_boxes", "edit_masks"}:
             return
         self._interaction_mode = mode
+        self._box_draw_active = False
+        self._box_draw_start = None
+        if self._box_draw_item is not None:
+            try:
+                scene = self._box_draw_item.scene()
+                if scene is not None:
+                    scene.removeItem(self._box_draw_item)
+            except RuntimeError:
+                pass
+            self._box_draw_item = None
+        if mode != "edit_boxes" and hasattr(self, "_clear_pending_box"):
+            self._clear_pending_box()
+        for button, button_mode in (
+            (self.view_mode_button, "view"),
+            (self.edit_boxes_mode_button, "edit_boxes"),
+        ):
+            button.blockSignals(True)
+            button.setChecked(mode == button_mode)
+            button.blockSignals(False)
         self._apply_interaction_mode_to_rect_items()
 
     def _apply_interaction_mode_to_rect_items(self) -> None:
         """Применяет текущий режим редактирования ко всем рамкам на сцене."""
         editable = self._interaction_mode == "edit_boxes"
         for item in self.rect_items:
-            item.setEditable(editable)
+            item.setEditable(editable and bool(getattr(item, "_manual_edit_enabled", True)))
+        self._update_annotation_controls()
+
+    def _update_annotation_controls(self) -> None:
+        """Updates annotation toolbar availability for the current view and mode."""
+        if not hasattr(self, "add_box_button"):
+            return
+        has_image = self._pixmap_item is not None
+        editing_boxes = self._interaction_mode == "edit_boxes"
+        selected_payload = self.app_state.selected_item or {}
+        can_rerun = self._current_crop_context() is not None or selected_payload.get("type") == "seeding"
+        has_pending_box = self._pending_box_item is not None
+        drawing_active = self._box_draw_active or has_pending_box
+
+        # Переключение страницы стека
+        if not editing_boxes:
+            self.tools_stack.setCurrentIndex(0)
+        elif drawing_active:
+            self.tools_stack.setCurrentIndex(2)
+        else:
+            self.tools_stack.setCurrentIndex(1)
+
+        # Состояние кнопок
+        self.add_box_button.setEnabled(has_image and editing_boxes and not drawing_active)
+        self.rerun_selected_button.setEnabled(has_image and can_rerun)
+        self.delete_annotation_button.setEnabled(
+            has_image and not drawing_active and self._selected_annotation_object() is not None
+        )
+        self.confirm_box_button.setEnabled(has_pending_box)
+        self.cancel_box_button.setEnabled(True)
 
     def _toggle_add_box_mode(self, enabled: bool) -> None:
         """Включает/выключает режим рисования боксов на канвасе."""
@@ -1314,6 +1897,13 @@ class ImageEditor(QMainWindow):
             shortcut="Ctrl+Shift+O",
             fallback_standard_icon=QStyle.SP_FileIcon,
         )
+        self.action_open_session = self._create_action(
+            "action_open.svg",
+            "Открыть сессию",
+            self._open_session_dialog,
+            shortcut="Ctrl+Alt+O",
+            fallback_standard_icon=QStyle.SP_FileDialogDetailedView,
+        )
         self.action_find = self._create_action(
             "action_detect.svg",
             "Найти",
@@ -1321,15 +1911,24 @@ class ImageEditor(QMainWindow):
             shortcut="Ctrl+F",
             fallback_standard_icon=QStyle.SP_MediaPlay,
         )
-        self.action_find_all = self._create_action(
+        self.btn_find_all = self._create_split_button(
             "action_detect_all.svg",
             "Найти на всех",
-            self.find_all_seedlings,
-            shortcut="Ctrl+Shift+F",
+            self.find_all_seedlings_new_only,
+            [
+                ("Найти только на новых страницах", self.find_all_seedlings_new_only),
+                ("Найти на всех страницах заново", self.find_all_seedlings),
+            ],
             fallback_standard_icon=QStyle.SP_BrowserReload,
         )
-        self.action_classify = self._create_action(
+        self.btn_classify = self._create_split_button(
             "action_classify.svg",
+            "Сегментировать",
+            self.classify_new_only,
+            [
+                ("Сегментировать только новые", self.classify_new_only),
+                ("Сегментировать все заново", self.classify),
+            ],
             "Сегментация",
             self.classify,
             shortcut="Ctrl+C",
@@ -1342,6 +1941,13 @@ class ImageEditor(QMainWindow):
             shortcut="Ctrl+R",
             fallback_standard_icon=QStyle.SP_BrowserReload,
         )
+        self.action_save = self._create_action(
+            "action_report.svg",
+            "Сохранить",
+            self._on_save,
+            shortcut="Ctrl+S",
+            fallback_standard_icon=QStyle.SP_DialogSaveButton,
+        )
         self.action_report = self._create_action(
             "action_report.svg",
             "Отчёт",
@@ -1349,9 +1955,16 @@ class ImageEditor(QMainWindow):
             shortcut="Ctrl+P",
             fallback_standard_icon=QStyle.SP_FileDialogContentsView,
         )
+        self.action_settings = self._create_action(
+            "action_fit.svg",
+            "Настройки",
+            self._open_app_settings,
+            shortcut="Ctrl+,",
+            fallback_standard_icon=QStyle.SP_FileDialogDetailedView,
+        )
         self.action_logout = self._create_action(
             "action_close.svg",
-            "Р’С‹Р№С‚Рё РёР· Р°РєРєР°СѓРЅС‚Р°",
+            "Выйти из аккаунта",
             self._request_logout,
             fallback_standard_icon=QStyle.SP_DialogCloseButton,
         )
@@ -1381,11 +1994,13 @@ class ImageEditor(QMainWindow):
         toolbar.addAction(self.action_add)
         toolbar.addSeparator()
         toolbar.addAction(self.action_find)
-        toolbar.addAction(self.action_find_all)
-        toolbar.addAction(self.action_classify)
+        toolbar.addWidget(self.btn_find_all)
+        toolbar.addWidget(self.btn_classify)
         toolbar.addAction(self.action_rotate)
         toolbar.addSeparator()
+        toolbar.addAction(self.action_save)
         toolbar.addAction(self.action_report)
+        toolbar.addAction(self.action_settings)
         toolbar.addSeparator()
         toolbar.addAction(self.action_zoom_in)
         toolbar.addAction(self.action_zoom_out)
@@ -1408,6 +2023,7 @@ class ImageEditor(QMainWindow):
         file_menu = self.menuBar().addMenu("Файл")
         file_menu.addAction(self.action_open)
         file_menu.addAction(self.action_add)
+        file_menu.addAction(self.action_open_session)
         file_menu.addSeparator()
         file_menu.addAction(self.action_report)
         file_menu.addSeparator()
@@ -1415,14 +2031,22 @@ class ImageEditor(QMainWindow):
 
         analysis_menu = self.menuBar().addMenu("Анализ")
         analysis_menu.addAction(self.action_find)
-        analysis_menu.addAction(self.action_find_all)
-        analysis_menu.addAction(self.action_classify)
+        find_all_menu = analysis_menu.addMenu("Найти на всех")
+        find_all_menu.addAction("Найти только на новых страницах", self.find_all_seedlings_new_only)
+        find_all_menu.addAction("Найти на всех страницах заново", self.find_all_seedlings)
+        classify_menu = analysis_menu.addMenu("Сегментировать")
+        classify_menu.addAction("Сегментировать выбранный заново", self.classify_selected)
+        classify_menu.addAction("Сегментировать только новые", self.classify_new_only)
+        classify_menu.addAction("Сегментировать все заново", self.classify)
         analysis_menu.addAction(self.action_rotate)
 
         view_menu = self.menuBar().addMenu("Вид")
         view_menu.addAction(self.action_zoom_in)
         view_menu.addAction(self.action_zoom_out)
         view_menu.addAction(self.action_fit)
+
+        settings_menu = self.menuBar().addMenu("Настройки")
+        settings_menu.addAction(self.action_settings)
 
         self.window_controls_widget = QWidget(self.menuBar())
         controls_layout = QHBoxLayout(self.window_controls_widget)
@@ -1474,6 +2098,34 @@ class ImageEditor(QMainWindow):
             action.setShortcut(shortcut)
         action.triggered.connect(handler)
         return action
+
+    def _create_split_button(
+        self,
+        icon_name: str,
+        text: str,
+        default_handler,
+        menu_items: list[tuple[str, object]],
+        *,
+        fallback_standard_icon: QStyle.StandardPixmap | None = None,
+    ) -> QToolButton:
+        """Создаёт кнопку со стрелкой: клик = default_handler, стрелка = меню вариантов."""
+        btn = QToolButton(self.main_toolbar)
+        btn.setIcon(
+            self.icon_manager.get_icon(
+                icon_name, fallback_standard_icon=fallback_standard_icon
+            )
+        )
+        btn.setText(text)
+        btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        btn.setPopupMode(QToolButton.MenuButtonPopup)
+
+        menu = QMenu(btn)
+        for item_text, handler in menu_items:
+            action = menu.addAction(item_text)
+            action.triggered.connect(handler)
+        btn.setMenu(menu)
+        btn.clicked.connect(default_handler)
+        return btn
 
     def _create_window_control_button(
         self,
@@ -1780,16 +2432,17 @@ class ImageEditor(QMainWindow):
 
     def clear_project(self) -> None:
         """Полностью очищает проект, состояние окна и текущие результаты анализа."""
-        self.app_state = AppState(image_storage=OriginalImage())
+        self.app_state = AppState(
+            image_storage=OriginalImage(),
+            current_user_id=self.current_user.id if self.current_user else None,
+        )
         self.image_storage = self.app_state.image_storage
         self._active_image_index = 0
         self._display_target = ("page", 0)
         self.zoom_factor = 1.0
         self.min_fit_zoom = 1.0
         self.app_state.zoom_factor = self.zoom_factor
-        self.project_files_list.clear()
         self.tree_widget.clear()
-        self.thumbnails_panel.set_images([])
         self.statistics_panel.set_summary(
             StatisticsPanel.build_summary(self.image_storage)
         )
@@ -1850,7 +2503,6 @@ class ImageEditor(QMainWindow):
             self._select_page(first_new_index)
         self._refresh_tree()
         self._refresh_statistics_panel()
-        self._refresh_thumbnails_panel()
 
     def _load_path(self, file_path: str) -> list[int]:
         """Выбирает способ загрузки файла по его расширению."""
@@ -1861,22 +2513,29 @@ class ImageEditor(QMainWindow):
 
     def _load_image(self, file_path: str) -> list[int]:
         """Загружает одно изображение с диска и добавляет его как страницу проекта."""
-        image = cv2.imread(file_path)
-        if image is None:
+        try:
+            pages = load_pages_from_path(file_path)
+        except ImageLoadError:
             self._log_error(f"Не удалось открыть изображение: {file_path}")
             self._show_error(
                 "Ошибка открытия",
                 f"Не удалось открыть изображение:\n{file_path}",
             )
             return []
-        index = self._append_page(image, file_path)
-        return [index]
+        return [self._append_page(page.image, page.source_path) for page in pages]
 
     def _load_pdf(self, pdf_path: str) -> list[int]:
-        """Рендерит PDF постранично в изображения и добавляет их в проект."""
+        """Render a PDF file into project pages."""
         pages: list[int] = []
-        doc = None
+        progress = AnalysisProgressDialog("Loading PDF", self)
         try:
+            progress.setRange(0, 0)
+            progress.show()
+
+            def on_progress(done: int, total: int) -> None:
+                progress.setRange(0, total)
+                progress.setStep(f"Page {done} of {total}...")
+                progress.setValue(done)
             doc = fitz.open(pdf_path)
             total = int(doc.page_count)
             progress = TaskProgressDialog(
@@ -1908,18 +2567,26 @@ class ImageEditor(QMainWindow):
                 pages.append(self._append_page(image, pdf_path))
                 progress.set_progress(page_num + 1)
 
-            progress.close()
+            loaded_pages = load_pages_from_path(
+                pdf_path,
+                on_progress=on_progress,
+                should_cancel=progress.wasCanceled,
+            )
+            pages = [
+                self._append_page(page.image, page.source_path)
+                for page in loaded_pages
+            ]
         except Exception as error:
-            logger.exception("Не удалось загрузить PDF %s", pdf_path)
-            self._log_error(f"Не удалось загрузить PDF {pdf_path}. Ошибка: {error}")
+            logger.exception("Failed to load PDF %s", pdf_path)
+            self._log_error(f"Failed to load PDF {pdf_path}. Error: {error}")
             self._show_error(
-                "Ошибка PDF",
-                f"Не удалось загрузить PDF:\n{pdf_path}\n\n{error}",
+                "PDF error",
+                f"Failed to load PDF:\n{pdf_path}\n\n{error}",
             )
         finally:
-            if doc is not None:
-                doc.close()
+            progress.close()
         return pages
+
 
     def _append_page(self, image: np.ndarray, source_path: str) -> int:
         """Добавляет страницу в хранилище проекта и список файлов интерфейса."""
@@ -1935,9 +2602,6 @@ class ImageEditor(QMainWindow):
         ):
             self.image_storage.class_object_image.append([])
 
-        item = QListWidgetItem(self._page_title(index))
-        item.setData(Qt.UserRole, index)
-        self.project_files_list.addItem(item)
         self._update_project_summary()
         return index
 
@@ -1956,45 +2620,34 @@ class ImageEditor(QMainWindow):
             return self.image_storage.source_files[page_index]
         return self.image_storage.file_path
 
-    def _on_project_row_changed(self, row: int) -> None:
-        """Реагирует на смену выбранной строки в списке страниц проекта."""
-        if row < 0 or row >= len(self.image_storage.images):
-            return
-        self._select_page(row)
-
     def _select_page(self, page_index: int) -> None:
         """Делает страницу активной и обновляет связанные элементы интерфейса."""
         if page_index < 0 or page_index >= len(self.image_storage.images):
             return
         self._restore_calibration_for_index(page_index)
         self.display_image_with_boxes(page_index)
-        if self.project_files_list.currentRow() != page_index:
-            self.project_files_list.blockSignals(True)
-            self.project_files_list.setCurrentRow(page_index)
-            self.project_files_list.blockSignals(False)
-        self.thumbnails_panel.set_active_index(page_index)
-        self._refresh_tree()
+        self._sync_tree_to_active_page()
         self._refresh_statistics_panel()
         self._update_canvas_status()
 
     def _refresh_tree(self) -> None:
-        """Перестраивает дерево слоёв для активной страницы проекта."""
+        """Перестраивает дерево проекта: все страницы, сеянцы и части."""
         self.tree_widget.blockSignals(True)
         self.tree_widget.clear()
 
-        if self.image_storage.images:
-            page_index = min(
-                max(self._active_image_index, 0),
-                len(self.image_storage.images) - 1,
-            )
-            image = self.image_storage.images[page_index]
+        active = min(
+            max(self._active_image_index, 0),
+            max(len(self.image_storage.images) - 1, 0),
+        )
+
+        for page_index, image in enumerate(self.image_storage.images):
+            source = self._source_file(page_index)
+            image_type = "pdf" if source.lower().endswith(".pdf") else "original"
             root = self.tree_widget.add_root_item(
                 name=self._page_title(page_index),
-                description=Path(self._source_file(page_index)).name,
+                description=Path(source).name,
                 index=page_index,
-                image_type="pdf"
-                if self._source_file(page_index).lower().endswith(".pdf")
-                else "original",
+                image_type=image_type,
                 image=image,
             )
             page_objects = []
@@ -2014,6 +2667,11 @@ class ImageEditor(QMainWindow):
                     confidence=obj.confidence,
                     manual=getattr(obj, "manual", False),
                 )
+                if getattr(obj, "orientation_uncertain", False):
+                    child.setIcon(
+                        0,
+                        self.style().standardIcon(QStyle.SP_MessageBoxWarning),
+                    )
                 for class_index, part in enumerate(obj.image_all_class or []):
                     self.tree_widget.add_class_item(
                         child,
@@ -2027,8 +2685,20 @@ class ImageEditor(QMainWindow):
                         class_name=part.class_name,
                     )
                 child.setExpanded(False)
-            root.setExpanded(False)
+            root.setExpanded(page_index == active)
 
+        self.tree_widget.blockSignals(False)
+        self._sync_tree_to_active_page()
+
+    def _sync_tree_to_active_page(self) -> None:
+        """Выделяет в дереве узел активной страницы без триггера сигналов."""
+        self.tree_widget.blockSignals(True)
+        for i in range(self.tree_widget.topLevelItemCount()):
+            item = self.tree_widget.topLevelItem(i)
+            payload = item.data(0, Qt.UserRole) or {}
+            if payload.get("index") == self._active_image_index:
+                self.tree_widget.setCurrentItem(item)
+                break
         self.tree_widget.blockSignals(False)
 
     def _refresh_statistics_panel(self) -> None:
@@ -2053,16 +2723,6 @@ class ImageEditor(QMainWindow):
             )
             summary = StatisticsPanel.build_summary(page_data)
         self.statistics_panel.set_summary(summary)
-
-    def _refresh_thumbnails_panel(self) -> None:
-        """Перестраивает панель миниатюр и выделяет активную страницу."""
-        images = [
-            image
-            for image in self.image_storage.images
-            if isinstance(image, np.ndarray)
-        ]
-        self.thumbnails_panel.set_images(images)
-        self.thumbnails_panel.set_active_index(self._active_image_index)
 
     def _on_tree_selection_changed(self) -> None:
         """Переключает отображение по выбору пользователя в дереве слоёв."""
@@ -2198,6 +2858,8 @@ class ImageEditor(QMainWindow):
         self.graphics_scene.clear()
         self.rect_items = []
         self.mask_items = []
+        self._pending_box_item = None
+        self._pending_box_target = None
         self._pixmap_item = None
         self._original_pixmap = None
         self._reset_measure_state(clear_items=True)
@@ -2355,11 +3017,11 @@ class ImageEditor(QMainWindow):
     def _part_mask_colors(self, class_name: str | None) -> tuple[QColor, QColor]:
         """Возвращает цвета заливки и контура маски по типу части растения."""
         value = (class_name or "").strip().lower()
-        if value == "root":
+        if value.startswith("root"):
             return QColor(52, 199, 89, 80), QColor(52, 199, 89, 210)
-        if value == "stem":
+        if value.startswith("stem"):
             return QColor(255, 159, 10, 80), QColor(255, 159, 10, 210)
-        if value in {"flower", "inflorescence"}:
+        if value.startswith("flower") or value == "inflorescence":
             return QColor(64, 156, 255, 80), QColor(64, 156, 255, 210)
         return QColor(46, 226, 201, 70), QColor(46, 226, 201, 190)
 
@@ -2510,9 +3172,15 @@ class ImageEditor(QMainWindow):
                     item = BBoxItem(
                         rect,
                         seed_obj,
+                        bbox_commit_callback=lambda obj, page=img_idx: self._commit_seedling_bbox(
+                            page,
+                            obj,
+                            auto_segment=True,
+                        ),
                         class_label=self._display_part_name(seed_obj.class_name),
                         pixels_per_mm=self.pixels_per_mm,
                     )
+                    item._manual_edit_enabled = True
                     item.setZValue(1.0)
                     self.graphics_scene.addItem(item)
                     self.rect_items.append(item)
@@ -2535,6 +3203,7 @@ class ImageEditor(QMainWindow):
                             class_label=self._display_part_name(part_obj.class_name),
                             pixels_per_mm=self.pixels_per_mm,
                         )
+                        item._manual_edit_enabled = False
                         item.setZValue(1.0)
                         self.graphics_scene.addItem(item)
                         self.rect_items.append(item)
@@ -2549,16 +3218,346 @@ class ImageEditor(QMainWindow):
                 item = BBoxItem(
                     rect,
                     part_obj,
+                    bbox_commit_callback=lambda obj: self._commit_part_bbox(obj),
                     class_label=self._display_part_name(part_obj.class_name),
                     pixels_per_mm=self.pixels_per_mm,
                 )
+                item._manual_edit_enabled = True
                 item.setZValue(1.0)
                 self.graphics_scene.addItem(item)
                 self.rect_items.append(item)
 
         self._apply_interaction_mode_to_rect_items()
-        self.thumbnails_panel.set_active_index(img_idx)
         self._update_canvas_status()
+
+
+    def _current_page_objects(self, page_index: int) -> list[ObjectImage]:
+        if self.image_storage.class_object_image is None:
+            self.image_storage.class_object_image = []
+        while len(self.image_storage.class_object_image) < len(self.image_storage.images):
+            self.image_storage.class_object_image.append([])
+        return self.image_storage.class_object_image[page_index]
+
+    def _current_crop_context(self) -> tuple[int, int, ObjectImage] | None:
+        if len(self._display_target) != 3 or self._display_target[0] != "crop":
+            return None
+        page_index = int(self._display_target[1])
+        object_index = int(self._display_target[2])
+        if not self.image_storage.class_object_image:
+            return None
+        if page_index >= len(self.image_storage.class_object_image):
+            return None
+        objects = self.image_storage.class_object_image[page_index]
+        if object_index >= len(objects):
+            return None
+        return page_index, object_index, objects[object_index]
+
+    def _start_add_box_mode(self) -> None:
+        if self._pixmap_item is None:
+            return
+        if self._interaction_mode != "edit_boxes":
+            self._set_interaction_mode("edit_boxes")
+        self._clear_pending_box()
+        self._box_draw_active = True
+        self._box_draw_start = None
+        self.statusBar().showMessage(
+            "Нарисуйте bbox, затем подгоните его ручками и нажмите ОК.",
+            4000,
+        )
+        self._update_annotation_controls()
+
+    def _clear_pending_box(self) -> None:
+        if self._pending_box_item is not None:
+            try:
+                scene = self._pending_box_item.scene()
+                if scene is not None:
+                    scene.removeItem(self._pending_box_item)
+            except RuntimeError:
+                pass
+        self._pending_box_item = None
+        self._pending_box_target = None
+
+    def _cancel_add_box_mode(self) -> None:
+        self._box_draw_active = False
+        self._box_draw_start = None
+        if self._box_draw_item is not None:
+            try:
+                scene = self._box_draw_item.scene()
+                if scene is not None:
+                    scene.removeItem(self._box_draw_item)
+            except RuntimeError:
+                pass
+            self._box_draw_item = None
+        self._clear_pending_box()
+        self._update_annotation_controls()
+
+    def _finish_add_box(self, rect: QRectF) -> None:
+        self._box_draw_active = False
+        self._box_draw_start = None
+        if self._box_draw_item is not None:
+            try:
+                scene = self._box_draw_item.scene()
+                if scene is not None:
+                    scene.removeItem(self._box_draw_item)
+            except RuntimeError:
+                pass
+            self._box_draw_item = None
+        if rect.width() < 3 or rect.height() < 3:
+            self._update_annotation_controls()
+            return
+        self._create_pending_box(rect)
+
+    def _create_pending_box(self, rect: QRectF) -> None:
+        self._clear_pending_box()
+        bbox = self._bbox_from_scene_rect(rect)
+        pending = ObjectImage(class_name="new", confidence=1.0, bbox=bbox)
+        item = BBoxItem(
+            QRectF(bbox[0], bbox[1], bbox[2] - bbox[0], bbox[3] - bbox[1]),
+            pending,
+            class_label="Новый",
+            pixels_per_mm=self.pixels_per_mm,
+        )
+        item._manual_edit_enabled = True
+        item.setEditable(True)
+        item.setSelected(True)
+        item.setZValue(3.0)
+        self.graphics_scene.addItem(item)
+        self._pending_box_item = item
+        self._pending_box_target = tuple(self._display_target)
+        self._update_annotation_controls()
+        self.statusBar().showMessage(
+            "Подгоните bbox и нажмите ОК, чтобы построить маску.",
+            5000,
+        )
+
+    def _bbox_from_scene_rect(self, rect: QRectF) -> tuple[int, int, int, int]:
+        normalized = rect.normalized()
+        return (
+            int(round(normalized.left())),
+            int(round(normalized.top())),
+            int(round(normalized.right())),
+            int(round(normalized.bottom())),
+        )
+
+    def _confirm_pending_box(self) -> None:
+        if self._pending_box_item is None or self._pending_box_target is None:
+            return
+        self._pending_box_item.update_bbox()
+        bbox = self._pending_box_item.obj.bbox
+        target = self._pending_box_target
+        self._clear_pending_box()
+        self._update_annotation_controls()
+        if target[0] == "page":
+            self._add_seedling_box(int(target[1]), bbox, auto_segment=True)
+            return
+        if target[0] == "crop":
+            context = self._current_crop_context()
+            if context is not None:
+                self._add_part_box(context[2], bbox)
+
+    def _rect_mask_for_bbox(
+        self,
+        image: np.ndarray,
+        bbox: tuple[int, int, int, int],
+    ) -> tuple[np.ndarray | None, np.ndarray | None]:
+        h, w = image.shape[:2]
+        x1, y1, x2, y2 = bbox
+        polygon = np.array(
+            [[x1, y1], [x2, y1], [x2, y2], [x1, y2]],
+            dtype=np.float32,
+        )
+        coarse = polygon_to_bitmap(polygon, h, w)
+        if coarse is None:
+            return polygon, None
+        refined = refine_mask_bitmap(image, coarse, build_refine_context(image))
+        mask = refined if refined is not None else coarse
+        refined_polygon = bitmap_to_polygon(mask)
+        return (refined_polygon if refined_polygon is not None else polygon), mask
+
+    def _choose_annotation_class(self, classes: list[str], title: str) -> str | None:
+        value, ok = QInputDialog.getItem(self, title, "Класс:", classes, 0, False)
+        if not ok:
+            return None
+        return str(value)
+
+    def _add_seedling_box(
+        self,
+        page_index: int,
+        bbox,
+        *,
+        auto_segment: bool = False,
+    ) -> None:
+        page_img = self.image_storage.images[page_index]
+        height, width = page_img.shape[:2]
+        clipped = clip_bbox_to_image(bbox, width, height)
+        if clipped is None:
+            return
+        class_name = self._choose_annotation_class(["cedr", "pinus", "seeding"], "Новый сеянец")
+        if class_name is None:
+            return
+        x1, y1, x2, y2 = clipped
+        crop = page_img[y1:y2, x1:x2].copy()
+        obj = ObjectImage(
+            class_name=class_name,
+            confidence=1.0,
+            image=[crop],
+            image_all_class=None,
+            bbox=clipped,
+        )
+        objects = self._current_page_objects(page_index)
+        objects.append(obj)
+        object_index = len(objects) - 1
+        self._after_manual_annotation_change(page_index, seeding_idx=object_index)
+        if auto_segment:
+            self._segment_single_seedling(page_index, object_index, obj)
+
+    def _add_part_box(self, seed_obj: ObjectImage, bbox) -> None:
+        if not seed_obj.image:
+            return
+        crop_img = seed_obj.image[0]
+        height, width = crop_img.shape[:2]
+        clipped = clip_bbox_to_image(bbox, width, height)
+        if clipped is None:
+            return
+        class_name = self._choose_annotation_class(
+            ["root", "stem", "inflorescence"],
+            "Новая часть растения",
+        )
+        if class_name is None:
+            return
+        x1, y1, x2, y2 = clipped
+        mask_polygon, mask_bitmap = self._rect_mask_for_bbox(crop_img, clipped)
+        part = AllClassImage(
+            class_name=class_name,
+            confidence=1.0,
+            image=crop_img[y1:y2, x1:x2].copy(),
+            bbox=clipped,
+            mask_polygon=mask_polygon,
+            mask_bitmap=mask_bitmap,
+        )
+        if seed_obj.image_all_class is None:
+            seed_obj.image_all_class = []
+        seed_obj.image_all_class.append(part)
+        context = self._current_crop_context()
+        if context is not None:
+            self._after_manual_annotation_change(context[0], seeding_idx=context[1])
+
+    def _commit_seedling_bbox(
+        self,
+        page_index: int,
+        obj: ObjectImage,
+        *,
+        auto_segment: bool = False,
+    ) -> None:
+        if page_index >= len(self.image_storage.images) or not obj.bbox:
+            return
+        page_img = self.image_storage.images[page_index]
+        height, width = page_img.shape[:2]
+        clipped = clip_bbox_to_image(obj.bbox, width, height)
+        if clipped is None:
+            return
+        obj.bbox = clipped
+        x1, y1, x2, y2 = clipped
+        obj.image = [page_img[y1:y2, x1:x2].copy()]
+        obj.image_all_class = None
+        self._after_manual_annotation_change(page_index)
+        if auto_segment:
+            try:
+                object_index = self._current_page_objects(page_index).index(obj)
+            except ValueError:
+                return
+            self._segment_single_seedling(page_index, object_index, obj)
+
+    def _commit_part_bbox(self, part: AllClassImage) -> None:
+        context = self._current_crop_context()
+        if context is None or not part.bbox:
+            return
+        page_index, seeding_idx, seed_obj = context
+        if not seed_obj.image:
+            return
+        crop_img = seed_obj.image[0]
+        height, width = crop_img.shape[:2]
+        clipped = clip_bbox_to_image(part.bbox, width, height)
+        if clipped is None:
+            return
+        part.bbox = clipped
+        x1, y1, x2, y2 = clipped
+        part.image = crop_img[y1:y2, x1:x2].copy()
+        part.mask_polygon, part.mask_bitmap = self._rect_mask_for_bbox(crop_img, clipped)
+        self._after_manual_annotation_change(page_index, seeding_idx=seeding_idx)
+
+    def _after_manual_annotation_change(
+        self,
+        page_index: int,
+        *,
+        seeding_idx: int | None = None,
+    ) -> None:
+        self._refresh_tree()
+        self._refresh_statistics_panel()
+        self.display_image_with_boxes(page_index, seeding_idx, preserve_view=True)
+        self._auto_save_session()
+
+    def _selected_annotation_object(self):
+        for item in self.graphics_scene.selectedItems():
+            if isinstance(item, BBoxItem):
+                return item.obj
+        item = self.tree_widget.currentItem()
+        payload = item.data(0, Qt.UserRole) if item is not None else None
+        if not payload:
+            return None
+        item_type = payload.get("type")
+        if item_type == "seeding" and self.image_storage.class_object_image:
+            objects = self.image_storage.class_object_image[int(payload["parent_index"])]
+            return objects[int(payload["index"])]
+        if item_type == "class" and self.image_storage.class_object_image:
+            objects = self.image_storage.class_object_image[int(payload["parent_index"])]
+            seed_obj = objects[int(payload["seeding_index"])]
+            return (seed_obj, seed_obj.image_all_class[int(payload["class_index"])])
+        return None
+
+    def _delete_selected_annotation(self) -> None:
+        selected = self._selected_annotation_object()
+        if selected is None:
+            self.statusBar().showMessage("Выберите bbox для удаления.", 2500)
+            return
+        reply = QMessageBox.question(
+            self,
+            "Удаление аннотации",
+            "Удалить выбранную аннотацию?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        if isinstance(selected, tuple):
+            seed_obj, part = selected
+            if seed_obj.image_all_class and part in seed_obj.image_all_class:
+                seed_obj.image_all_class.remove(part)
+                context = self._current_crop_context()
+                page_index = context[0] if context is not None else self._active_image_index
+                seeding_idx = context[1] if context is not None else None
+                self._after_manual_annotation_change(page_index, seeding_idx=seeding_idx)
+                self.statusBar().showMessage("Часть растения удалена.", 2500)
+            return
+        if isinstance(selected, AllClassImage) and self.image_storage.class_object_image:
+            for page_index, objects in enumerate(self.image_storage.class_object_image):
+                for seeding_idx, seed_obj in enumerate(objects):
+                    if seed_obj.image_all_class and selected in seed_obj.image_all_class:
+                        seed_obj.image_all_class.remove(selected)
+                        self._after_manual_annotation_change(
+                            page_index,
+                            seeding_idx=seeding_idx,
+                        )
+                        self.statusBar().showMessage("Часть растения удалена.", 2500)
+                        return
+        if not isinstance(selected, ObjectImage) or not self.image_storage.class_object_image:
+            return
+        for page_index, objects in enumerate(self.image_storage.class_object_image):
+            if selected in objects:
+                objects.remove(selected)
+                self._after_manual_annotation_change(page_index)
+                self.statusBar().showMessage("Сеянец удалён.", 2500)
+                return
 
     def _seedling_title(self, object_index: int, obj: ObjectImage) -> str:
         """Возвращает заголовок узла сеянца для дерева слоёв."""
@@ -2596,15 +3595,54 @@ class ImageEditor(QMainWindow):
                 preserve_view=preserve_view,
             )
 
-    def find_seedlings(self) -> None:
-        """Запускает детекцию сеянцев на активной странице и обновляет интерфейс."""
-        if not self.image_storage.images:
-            self._show_info("Нет данных", "Сначала откройте изображение или PDF.")
+    def _analysis_is_running(self) -> bool:
+        return self._analysis_thread is not None and self._analysis_thread.isRunning()
+
+    def _cleanup_analysis_worker(self) -> None:
+        self._analysis_thread = None
+        self._analysis_progress = None
+
+    def _on_analysis_progress(
+        self,
+        progress: AnalysisProgressDialog,
+        done: int,
+        total: int,
+        text: str,
+    ) -> None:
+        progress.setRange(0, total)
+        if text:
+            progress.setStep(text)
+        progress.setValue(done)
+
+    def _start_detection_worker(
+        self,
+        page_indices: list[int],
+        *,
+        title: str,
+        on_complete,
+    ) -> None:
+        if self._analysis_is_running():
+            self.statusBar().showMessage("Анализ уже выполняется", 3000)
             return
         model = self._ensure_detect_model()
         if model is None:
             return
 
+        progress = AnalysisProgressDialog(title, self)
+        progress.setRange(0, len(page_indices))
+        progress.show()
+
+        thread = DetectionWorkerThread(model, self.app_state, page_indices, self)
+        progress.canceled.connect(thread.request_cancel)
+        thread.progress.connect(
+            lambda done, total, text: self._on_analysis_progress(
+                progress, done, total, text
+            )
+        )
+        thread.finished_ok.connect(
+            lambda result: self._on_detection_worker_done(
+                progress, result, on_complete
+            )
         image = self.image_storage.images[self._active_image_index]
         progress = TaskProgressDialog(
             "Поиск сеянцев",
@@ -2618,14 +3656,57 @@ class ImageEditor(QMainWindow):
             image,
             conf_threshold=DETECTION_CONFIDENCE_THRESHOLD,
         )
-        objects = run_detection(
+        thread.error.connect(lambda error: self._on_analysis_worker_error(progress, error))
+        thread.finished.connect(thread.deleteLater)
+
+        self._analysis_progress = progress
+        self._analysis_thread = thread
+        thread.start()
+
+    def _start_classification_worker(
+        self,
+        pending: list[tuple[int, int, ObjectImage]],
+        *,
+        title: str,
+        on_complete,
+    ) -> None:
+        if self._analysis_is_running():
+            self.statusBar().showMessage("Анализ уже выполняется", 3000)
+            return
+        model = self._ensure_classify_model()
+        if model is None:
+            return
+
+        progress = AnalysisProgressDialog(title, self)
+        progress.setRange(0, len(pending))
+        progress.show()
+
+        thread = ClassificationWorkerThread(
+            model,
             self.app_state,
-            self._active_image_index,
-            results,
-            detection_class_names=DETECTION_CLASS_NAMES,
-            iou_threshold=DETECTION_IOU_THRESHOLD,
-            rotate_k=ROTATE_K,
+            pending,
+            self._analysis_batch_size,
+            self,
         )
+        progress.canceled.connect(thread.request_cancel)
+        thread.progress.connect(
+            lambda done, total, text: self._on_analysis_progress(
+                progress, done, total, text
+            )
+        )
+        thread.finished_ok.connect(
+            lambda result: self._on_classification_worker_done(
+                progress, result, on_complete
+            )
+        )
+        thread.error.connect(lambda error: self._on_analysis_worker_error(progress, error))
+        thread.finished.connect(thread.deleteLater)
+
+        self._analysis_progress = progress
+        self._analysis_thread = thread
+        thread.start()
+
+    def _on_detection_worker_done(self, progress, result, on_complete) -> None:
         progress.set_progress(
             1,
             message="Поиск сеянцев завершён.",
@@ -2635,22 +3716,83 @@ class ImageEditor(QMainWindow):
         self._refresh_tree()
         self._refresh_statistics_panel()
         self._restore_display(preserve_view=True)
-        self._log_action(
-            "run_analysis",
-            f"Детекция завершена для страницы {self._active_image_index}; объектов: {len(objects)}",
-        )
-        self.statusBar().showMessage(f"Найдено растений: {len(objects)}", 3000)
+        on_complete(result)
+        self._auto_save_session()
+        self._cleanup_analysis_worker()
 
-    def find_all_seedlings(self) -> None:
-        """Выполняет детекцию сеянцев на всех страницах текущего проекта."""
+    def _on_classification_worker_done(self, progress, result, on_complete) -> None:
+        progress.close()
+        self._refresh_tree()
+        self._refresh_statistics_panel()
+        self._restore_display(preserve_view=True)
+        on_complete(result)
+        self._auto_save_session()
+        self._cleanup_analysis_worker()
+
+    def _on_analysis_worker_error(self, progress, error: str) -> None:
+        progress.close()
+        self._cleanup_analysis_worker()
+        self._log_error(f"Ошибка фонового анализа: {error}")
+        self._show_error("Ошибка анализа", error)
+
+    def find_seedlings(self) -> None:
+        """Запускает детекцию сеянцев на активной странице в фоне."""
         if not self.image_storage.images:
             self._show_info("Нет данных", "Сначала откройте изображение или PDF.")
             return
-        model = self._ensure_detect_model()
-        if model is None:
+        page_index = self._active_image_index
+
+        def on_complete(result) -> None:
+            count = result["page_counts"].get(page_index, 0)
+            self._log_action(
+                "run_analysis",
+                f"Детекция завершена для страницы {page_index}; объектов: {count}",
+            )
+            self.statusBar().showMessage(f"Найдено растений: {count}", 3000)
+
+        self._start_detection_worker(
+            [page_index],
+            title="Поиск сеянцев",
+            on_complete=on_complete,
+        )
+
+    def find_all_seedlings(self) -> None:
+        """Выполняет детекцию сеянцев на всех страницах в фоне."""
+        if not self.image_storage.images:
+            self._show_info("Нет данных", "Сначала откройте изображение или PDF.")
+            return
+        total = len(self.image_storage.images)
+
+        def on_complete(result) -> None:
+            processed = result["processed"]
+            self._log_action(
+                "run_analysis",
+                f"Пакетная детекция завершена; обработано {processed} из {total}",
+            )
+            self.statusBar().showMessage(
+                f"Пакетная детекция растений завершена: {processed}/{total}",
+                3000,
+            )
+
+        self._start_detection_worker(
+            list(range(total)),
+            title="Поиск сеянцев",
+            on_complete=on_complete,
+        )
+
+    def find_all_seedlings_new_only(self) -> None:
+        """Выполняет детекцию только на страницах без результатов, в фоне."""
+        if not self.image_storage.images:
+            self._show_info("Нет данных", "Сначала откройте изображение или PDF.")
             return
 
-        total = len(self.image_storage.images)
+        pages_to_process = [
+            page_index
+            for page_index, image in enumerate(self.image_storage.images)
+            if not (
+                self.image_storage.class_object_image
+                and page_index < len(self.image_storage.class_object_image)
+                and self.image_storage.class_object_image[page_index]
         progress = TaskProgressDialog(
             "Поиск сеянцев",
             "Выполняем поиск на всех страницах проекта...",
@@ -2667,31 +3809,81 @@ class ImageEditor(QMainWindow):
                 image,
                 conf_threshold=DETECTION_CONFIDENCE_THRESHOLD,
             )
-            run_detection(
-                self.app_state,
-                page_index,
-                results,
-                detection_class_names=DETECTION_CLASS_NAMES,
-                iou_threshold=DETECTION_IOU_THRESHOLD,
-                rotate_k=ROTATE_K,
+        ]
+        if not pages_to_process:
+            self.statusBar().showMessage("Все страницы уже обработаны", 3000)
+            return
+
+        total = len(pages_to_process)
+
+        def on_complete(result) -> None:
+            processed = result["processed"]
+            self._log_action(
+                "run_analysis",
+                f"Детекция новых страниц завершена; обработано: {processed}/{total}",
+            )
+            self.statusBar().showMessage(
+                f"Поиск завершён: обработано {processed} новых страниц", 3000
             )
             processed += 1
             progress.set_progress(processed, detail=f"Страница {page_index + 1} из {total}")
 
-        progress.close()
-        self._refresh_tree()
-        self._refresh_statistics_panel()
-        self._restore_display(preserve_view=True)
-        self._log_action(
-            "run_analysis",
-            f"Пакетная детекция завершена; обработано {processed} из {total}",
-        )
-        self.statusBar().showMessage(
-            f"Пакетная детекция растений завершена: {processed}/{total}",
-            3000,
+        self._start_detection_worker(
+            pages_to_process,
+            title="Поиск сеянцев (новые)",
+            on_complete=on_complete,
         )
 
+    def _segment_single_seedling(
+        self,
+        page_index: int,
+        object_index: int,
+        obj: ObjectImage,
+    ) -> None:
+        if self._analysis_is_running():
+            self.statusBar().showMessage("Анализ уже выполняется", 3000)
+            return
+        if not obj.image:
+            self._commit_seedling_bbox(page_index, obj)
+        if not obj.image:
+            self._show_info("Сегментация", "У выбранного сеянца нет crop-изображения.")
+            return
+
+        def on_complete(result) -> None:
+            processed = result["processed"]
+            self._log_action(
+                "run_analysis",
+                f"Сегментация выбранного сеянца завершена; обработано: {processed}",
+            )
+            self.statusBar().showMessage(
+                "Маска построена по новому bbox.",
+                3000,
+            )
+
+        self._start_classification_worker(
+            [(page_index, object_index, obj)],
+            title="Сегментация выбранного",
+            on_complete=on_complete,
+        )
+
+    def classify_selected(self) -> None:
+        """Runs segmentation again only for the currently selected seedling."""
+        context = self._current_crop_context()
+        if context is None:
+            payload = self.app_state.selected_item or {}
+            if payload.get("type") == "seeding" and self.image_storage.class_object_image:
+                page_index = int(payload["parent_index"])
+                object_index = int(payload["index"])
+                objects = self.image_storage.class_object_image[page_index]
+                if object_index < len(objects):
+                    context = (page_index, object_index, objects[object_index])
+        if context is None:
+            self._show_info("Сегментация", "Выберите сеянец в дереве или на холсте.")
+            return
+        self._segment_single_seedling(*context)
+
     def classify(self) -> None:
+        """Классифицирует части растений в найденных объектах в фоне."""
         """Сегментирует части растений внутри найденных объектов проекта."""
         if not self.image_storage.class_object_image or not any(
             self.image_storage.class_object_image
@@ -2701,10 +3893,32 @@ class ImageEditor(QMainWindow):
                 "Сначала выполните детекцию растений.",
             )
             return
-        model = self._ensure_classify_model()
-        if model is None:
+
+        pending = [
+            (page_index, object_index, obj)
+            for page_index, objects in enumerate(
+                self.image_storage.class_object_image or []
+            )
+            for object_index, obj in enumerate(objects)
+            if obj.image
+        ]
+        if not pending:
+            self.statusBar().showMessage("Нет объектов для сегментации", 3000)
             return
 
+        def on_complete(result) -> None:
+            processed = result["processed"]
+            self._log_action(
+                "run_analysis",
+                f"Сегментация завершена; обработано объектов: {processed}",
+            )
+            self.statusBar().showMessage("Сегментация завершена", 3000)
+
+        self._start_classification_worker(
+            pending,
+            title="Сегментация частей",
+            on_complete=on_complete,
+        )
         total_objects = sum(
             len(objects) for objects in self.image_storage.class_object_image or []
         )
@@ -2716,10 +3930,46 @@ class ImageEditor(QMainWindow):
         )
         progress.show()
 
-        processed = 0
-        for page_index, objects in enumerate(
-            self.image_storage.class_object_image or []
+    def classify_new_only(self) -> None:
+        """Сегментирует только сеянцы без существующих результатов, в фоне."""
+        if not self.image_storage.class_object_image or not any(
+            self.image_storage.class_object_image
         ):
+            self._show_info(
+                "Нет детекций",
+                "Сначала выполните детекцию растений.",
+            )
+            return
+
+        pending = [
+            (page_index, object_index, obj)
+            for page_index, objects in enumerate(
+                self.image_storage.class_object_image or []
+            )
+            for object_index, obj in enumerate(objects)
+            if obj.image and not obj.image_all_class
+        ]
+        if not pending:
+            self.statusBar().showMessage("Все сеянцы уже сегментированы", 3000)
+            return
+
+        total = len(pending)
+
+        def on_complete(result) -> None:
+            processed = result["processed"]
+            self._log_action(
+                "run_analysis",
+                f"Сегментация новых объектов завершена; обработано: {processed}/{total}",
+            )
+            self.statusBar().showMessage(
+                f"Сегментация завершена: обработано {processed} новых сеянцев", 3000
+            )
+
+        self._start_classification_worker(
+            pending,
+            title="Сегментация (новые)",
+            on_complete=on_complete,
+        )
             for object_index, obj in enumerate(objects):
                 if progress.was_canceled():
                     progress.close()
@@ -2775,7 +4025,6 @@ class ImageEditor(QMainWindow):
 
         self._refresh_tree()
         self._refresh_statistics_panel()
-        self._refresh_thumbnails_panel()
         if result.target == "crop" and result.crop_index is not None:
             self.display_image_with_boxes(result.page_index, result.crop_index)
         else:
@@ -2784,6 +4033,8 @@ class ImageEditor(QMainWindow):
 
     def _default_report_dir(self) -> str:
         """Подбирает каталог по умолчанию для сохранения итогового PDF-отчёта."""
+        if self._report_output_dir and os.path.isdir(self._report_output_dir):
+            return self._report_output_dir
         current_source = self._source_file(self._active_image_index)
         if current_source:
             source_dir = os.path.dirname(current_source)
@@ -2817,6 +4068,7 @@ class ImageEditor(QMainWindow):
                 output_path,
             )
             self.app_state.last_report_path = saved_path
+            self._auto_save_session()
             self._log_action(
                 "generate_report",
                 f"Сформирован PDF-отчёт: {saved_path}",
@@ -2831,3 +4083,68 @@ class ImageEditor(QMainWindow):
                 "Ошибка отчёта",
                 f"Не удалось создать PDF-отчёт:\n{error}",
             )
+
+    def _on_save(self) -> None:
+        """Сохраняет текущую сессию по запросу пользователя."""
+        try:
+            save_current_session(self.app_state, self.current_user)
+            self.statusBar().showMessage("Сессия сохранена.", 3000)
+        except Exception as exc:
+            QMessageBox.warning(self, "Ошибка сохранения", str(exc))
+
+    def _open_session_dialog(self) -> None:
+        """Открывает диалог выбора сохранённой сессии и восстанавливает её."""
+        user_id = self.app_state.current_user_id
+        if user_id is None:
+            self._show_info("Нет пользователя", "Войдите в систему чтобы открыть сессию.")
+            return
+
+        dlg = SessionPickerDialog(user_id=user_id, parent=self)
+        if dlg.exec_() != SessionPickerDialog.Accepted:
+            return
+
+        session_id = dlg.selected_session_id()
+        if session_id is None:
+            return
+
+        try:
+            state = load_session(session_id)
+        except Exception as exc:
+            self._show_error("Ошибка загрузки сессии", str(exc))
+            return
+
+        if state is None:
+            self._show_error("Сессия не найдена", f"Сессия {session_id} не найдена в БД.")
+            return
+
+        missing = getattr(state, "_missing_source", None)
+        loaded_missing = self._load_session_source_images(state)
+        if loaded_missing:
+            missing = loaded_missing
+        if self.current_user is not None:
+            state.current_user_id = self.current_user.id
+
+        self.app_state = state
+        self.image_storage = state.image_storage
+        self.pixels_per_mm = state.pixels_per_mm
+
+        self._refresh_tree()
+        self._refresh_statistics_panel()
+        self._restore_display(preserve_view=False)
+
+        if missing:
+            self._show_info(
+                "Файл не найден",
+                f"Исходный файл не найден:\n{missing}\n\n"
+                "Данные анализа восстановлены, изображения недоступны.",
+            )
+        else:
+            self.statusBar().showMessage(
+                f"Сессия восстановлена: {state.image_storage.file_path}", 4000
+            )
+
+    def _auto_save_session(self) -> None:
+        """Автоматически сохраняет сессию после инференса."""
+        if not self._auto_save_enabled:
+            return
+        auto_save_current_session(self.app_state, self.current_user, logger=logger)
