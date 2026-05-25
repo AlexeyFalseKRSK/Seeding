@@ -27,6 +27,7 @@ class AllClassImage:
     bbox: BBox | None = None
     mask_polygon: np.ndarray | None = None
     mask_bitmap: np.ndarray | None = None
+    manual: bool = False
 
 
 @dataclass
@@ -40,6 +41,7 @@ class ObjectImage:
     bbox: BBox | None = None
     rotation_k: int = 0
     orientation_uncertain: bool = False
+    manual: bool = False
 
 
 @dataclass

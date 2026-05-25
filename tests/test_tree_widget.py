@@ -76,3 +76,49 @@ def test_tree_widget_has_two_columns_and_non_editable_items():
     tree.deleteLater()
     if created:
         app.quit()
+
+
+def test_low_confidence_child_has_warning_background():
+    """Сеянец с confidence < 0.5 должен иметь ненулевой цвет фона."""
+    app, created = _ensure_offscreen_qt()
+    tree = LayerTreeWidget()
+    root = tree.add_root_item("p", "d", 0, "original", None)
+    child = tree.add_child_item(root, "S", "d", 0, 0, "seeding", None, confidence=0.3)
+
+    bg = child.background(0)
+    assert bg.color().alpha() > 0
+
+    tree.deleteLater()
+    if created:
+        app.quit()
+
+
+def test_normal_confidence_child_has_no_warning_background():
+    """Сеянец с confidence >= 0.5 не должен иметь предупреждающего фона."""
+    app, created = _ensure_offscreen_qt()
+    tree = LayerTreeWidget()
+    root = tree.add_root_item("p", "d", 0, "original", None)
+    child = tree.add_child_item(root, "S", "d", 0, 0, "seeding", None, confidence=0.8)
+
+    bg = child.background(0)
+    assert bg.color().alpha() == 0
+
+    tree.deleteLater()
+    if created:
+        app.quit()
+
+
+def test_manual_item_has_manual_prefix():
+    """Ручной объект должен иметь префикс ✏ в имени."""
+    app, created = _ensure_offscreen_qt()
+    tree = LayerTreeWidget()
+    root = tree.add_root_item("p", "d", 0, "original", None)
+    child = tree.add_child_item(
+        root, "Сеянец 1", "d", 0, 0, "seeding", None,
+        confidence=1.0, manual=True
+    )
+    assert "✏" in child.text(0)
+
+    tree.deleteLater()
+    if created:
+        app.quit()

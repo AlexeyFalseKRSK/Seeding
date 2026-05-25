@@ -75,6 +75,28 @@ def bitmap_to_polygon(binary_mask: np.ndarray) -> np.ndarray | None:
     return np.ascontiguousarray(largest.reshape(-1, 2).astype(np.float32))
 
 
+def bitmap_to_contours(
+    binary_mask: np.ndarray | None,
+) -> list[np.ndarray]:
+    """Возвращает все контуры маски — внешние + дыры — через RETR_CCOMP.
+
+    Каждый контур — np.ndarray Nx2 float32 в координатах маски.
+    Используется для QPainterPath с OddEvenFill: дыры прозрачны.
+    """
+    if binary_mask is None or binary_mask.size == 0:
+        return []
+    contours, _ = cv2.findContours(
+        binary_mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE
+    )
+    result = []
+    for contour in (contours or []):
+        if len(contour) >= 3:
+            result.append(
+                np.ascontiguousarray(contour.reshape(-1, 2).astype(np.float32))
+            )
+    return result
+
+
 def _compute_threshold(
     gray: np.ndarray,
     coarse_mask: np.ndarray,
@@ -276,6 +298,7 @@ def rotate_bitmap(
 __all__ = [
     "bitmap_to_polygon",
     "build_refine_context",
+    "bitmap_to_contours",
     "polygon_to_bitmap",
     "RefineMaskContext",
     "refine_mask_bitmap",

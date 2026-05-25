@@ -28,6 +28,7 @@ from PyQt5.QtGui import (
     QImage,
     QKeySequence,
     QPainter,
+    QPainterPath,
     QPen,
     QPixmap,
     QPolygonF,
@@ -37,10 +38,12 @@ from PyQt5.QtWidgets import (
     QAction,
     QApplication,
     QDialog,
+    QFrame,
     QFileDialog,
     QFrame,
     QGraphicsItem,
     QGraphicsLineItem,
+    QGraphicsPathItem,
     QGraphicsPixmapItem,
     QGraphicsRectItem,
     QGraphicsScene,
@@ -54,6 +57,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QProgressBar,
     QShortcut,
     QSizePolicy,
     QSplitter,
@@ -67,6 +71,7 @@ from PyQt5.QtWidgets import (
 )
 
 from seeding.auth import AuthUser
+from seeding.mask_refiner import bitmap_to_contours
 from seeding.config import (
     CALIBRATION_PIXELS_PER_MM_DEFAULT,
     CLASS_DISPLAY_NAMES,
@@ -128,6 +133,8 @@ from seeding.ui.session_actions import (
 from seeding.ui.session_picker import SessionPickerDialog
 from seeding.ui.settings_dialog import AppSettingsDialog
 from seeding.ui.statistics_panel import StatisticsPanel
+from seeding.ui.thumbnails_panel import ThumbnailsPanel
+from seeding.ui.detail_panel import SeedlingDetailPanel
 from seeding.ui.tree_widget import LayerTreeWidget
 from seeding.user_service import record_user_action
 from seeding.utils import clip_bbox_to_image, rotate_bbox
@@ -426,15 +433,36 @@ class AnalysisProgressDialog(QDialog):
 class CanvasGraphicsView(QGraphicsView):
     """Графический viewport с поддержкой прокрутки средней кнопкой мыши."""
 
+    box_drawn = pyqtSignal(object)
+    draw_mode_cancelled = pyqtSignal()
+
     def __init__(self, scene: QGraphicsScene, parent=None) -> None:
         """Создаёт viewport и подготавливает поля для ручного перемещения холста."""
         super().__init__(scene, parent)
         self._drag_active = False
         self._drag_start_pos = QPoint()
         self._scroll_start_pos = QPoint()
+        self._draw_mode = False
+        self._draw_active = False
+        self._draw_start_pos = QPointF()
+        self._rubber_item = None
+
+    def set_draw_mode(self, enabled: bool) -> None:
+        """Переключает режим рисования боксов."""
+        self._draw_mode = enabled
+        self.setCursor(Qt.CrossCursor if enabled else Qt.ArrowCursor)
+        if not enabled and self._rubber_item is not None:
+            self.scene().removeItem(self._rubber_item)
+            self._rubber_item = None
+        self._draw_active = False
 
     def mousePressEvent(self, event) -> None:
         """Включает режим перетаскивания холста при нажатии средней кнопки мыши."""
+        if self._draw_mode and event.button() == Qt.LeftButton:
+            self._draw_active = True
+            self._draw_start_pos = self.mapToScene(event.pos())
+            event.accept()
+            return
         if event.button() == Qt.MiddleButton:
             self._drag_active = True
             self.setCursor(Qt.ClosedHandCursor)
@@ -449,6 +477,19 @@ class CanvasGraphicsView(QGraphicsView):
 
     def mouseMoveEvent(self, event) -> None:
         """Перемещает холст вслед за курсором, пока активен режим ручной прокрутки."""
+        if self._draw_active:
+            current = self.mapToScene(event.pos())
+            rect = QRectF(self._draw_start_pos, current).normalized()
+            if self._rubber_item is None:
+                self._rubber_item = QGraphicsRectItem()
+                pen = QPen(QColor(255, 255, 0), 2, Qt.DashLine)
+                self._rubber_item.setPen(pen)
+                self._rubber_item.setBrush(Qt.transparent)
+                self._rubber_item.setZValue(10)
+                self.scene().addItem(self._rubber_item)
+            self._rubber_item.setRect(rect)
+            event.accept()
+            return
         if self._drag_active:
             delta = event.pos() - self._drag_start_pos
             self.horizontalScrollBar().setValue(self._scroll_start_pos.x() - delta.x())
@@ -459,12 +500,122 @@ class CanvasGraphicsView(QGraphicsView):
 
     def mouseReleaseEvent(self, event) -> None:
         """Завершает ручное перемещение холста после отпускания средней кнопки."""
+        if self._draw_active and event.button() == Qt.LeftButton:
+            self._draw_active = False
+            current = self.mapToScene(event.pos())
+            rect = QRectF(self._draw_start_pos, current).normalized()
+            if self._rubber_item is not None:
+                self.scene().removeItem(self._rubber_item)
+                self._rubber_item = None
+            if rect.width() > 5 and rect.height() > 5:
+                self.box_drawn.emit(rect)
+            event.accept()
+            return
         if event.button() == Qt.MiddleButton:
             self._drag_active = False
             self.setCursor(Qt.ArrowCursor)
             event.accept()
             return
         super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event) -> None:
+        if self._draw_mode and event.key() == Qt.Key_Escape:
+            self.set_draw_mode(False)
+            self.draw_mode_cancelled.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
+class TaskProgressDialog(QDialog):
+    """Компактный диалог прогресса в стиле приложения."""
+
+    def __init__(
+        self,
+        title: str,
+        message: str,
+        *,
+        maximum: int,
+        parent: QWidget | None = None,
+        cancel_text: str = "Отмена",
+    ) -> None:
+        super().__init__(parent)
+        self._canceled = False
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.setMinimumWidth(420)
+        self.setObjectName("panelCard")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        self.title_label = QLabel(title, self)
+        self.title_label.setObjectName("panelCardTitle")
+        layout.addWidget(self.title_label)
+
+        self.message_label = QLabel(message, self)
+        self.message_label.setObjectName("panelHint")
+        self.message_label.setWordWrap(True)
+        layout.addWidget(self.message_label)
+
+        self.progress_bar = QProgressBar(self)
+        self.progress_bar.setRange(0, maximum)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFormat("%v / %m")
+        layout.addWidget(self.progress_bar)
+
+        self.detail_label = QLabel("", self)
+        self.detail_label.setObjectName("panelHint")
+        self.detail_label.setWordWrap(True)
+        self.detail_label.setVisible(False)
+        layout.addWidget(self.detail_label)
+
+        actions_layout = QHBoxLayout()
+        actions_layout.addStretch(1)
+        self.cancel_button = QPushButton(cancel_text, self)
+        self.cancel_button.setProperty("variant", "secondary")
+        self.cancel_button.clicked.connect(self._handle_cancel)
+        actions_layout.addWidget(self.cancel_button)
+        layout.addLayout(actions_layout)
+
+    def _handle_cancel(self) -> None:
+        """Помечает операцию как отменённую и закрывает диалог."""
+
+        self._canceled = True
+        self.close()
+
+    def set_message(self, message: str, *, detail: str | None = None) -> None:
+        """Обновляет подпись и дополнительный статус."""
+
+        self.message_label.setText(message)
+        if detail:
+            self.detail_label.setText(detail)
+            self.detail_label.setVisible(True)
+        else:
+            self.detail_label.clear()
+            self.detail_label.setVisible(False)
+        QApplication.processEvents()
+
+    def set_progress(
+        self,
+        value: int,
+        *,
+        message: str | None = None,
+        detail: str | None = None,
+    ) -> None:
+        """Обновляет значение прогресса и подписи."""
+
+        if message is not None or detail is not None:
+            self.set_message(message or self.message_label.text(), detail=detail)
+        self.progress_bar.setValue(value)
+        QApplication.processEvents()
+
+    def was_canceled(self) -> bool:
+        """Возвращает `True`, если пользователь отменил операцию."""
+
+        return self._canceled
 
 
 class ImageEditor(QMainWindow):
@@ -559,6 +710,12 @@ class ImageEditor(QMainWindow):
         self._install_frameless_event_filters()
         self._update_window_control_buttons()
         QShortcut(QKeySequence("M"), self, self.toggle_measure_mode)
+        QShortcut(QKeySequence(Qt.Key_Right), self).activated.connect(
+            lambda: self._navigate_seedling(1)
+        )
+        QShortcut(QKeySequence(Qt.Key_Left), self).activated.connect(
+            lambda: self._navigate_seedling(-1)
+        )
         self.statusBar().showMessage("Откройте изображение или PDF", 3000)
 
     def _apply_inference_settings(self) -> None:
@@ -594,6 +751,39 @@ class ImageEditor(QMainWindow):
     def _on_models_load_error(self, error_text: str) -> None:
         self.statusBar().showMessage("Ошибка загрузки моделей", 5000)
         logger.error("Не удалось предзагрузить модели: %s", error_text)
+    def preload_models(self) -> bool:
+        """Предзагружает модели детекции и сегментации после старта окна."""
+
+        progress = TaskProgressDialog(
+            "Подготовка моделей",
+            "Загружаем модели AI для детекции и сегментации...",
+            maximum=2,
+            parent=self,
+        )
+        progress.cancel_button.setEnabled(False)
+        progress.show()
+        QApplication.processEvents()
+
+        if self._ensure_detect_model() is None:
+            progress.close()
+            return False
+        progress.set_progress(
+            1,
+            message="Модель детекции готова.",
+            detail=Path(self.weights_path).name,
+        )
+
+        if self._ensure_classify_model() is None:
+            progress.close()
+            return False
+        progress.set_progress(
+            2,
+            message="Модель сегментации готова.",
+            detail=Path(self.classify_weights_path).name,
+        )
+        progress.close()
+        self.statusBar().showMessage("Модели загружены и готовы к работе", 3000)
+        return True
 
     def _log_action(self, action: str, details: str | None = None) -> None:
         """Сохраняет действие пользователя, не прерывая UI при ошибках логирования."""
@@ -691,6 +881,13 @@ class ImageEditor(QMainWindow):
         self.edit_masks_mode_button.setCheckable(True)
         self.edit_masks_mode_button.setEnabled(False)
         self.edit_masks_mode_button.setVisible(False)
+
+        self.add_box_mode_button = QPushButton("+ Бокс", mode_bar)
+        self.add_box_mode_button.setCheckable(True)
+        self.add_box_mode_button.setProperty("segmented", "true")
+        self.add_box_mode_button.setToolTip("Нарисуй прямоугольник чтобы добавить объект вручную")
+        self.add_box_mode_button.toggled.connect(self._toggle_add_box_mode)
+        mode_bar_layout.addWidget(self.add_box_mode_button)
 
         interaction_layout.addWidget(mode_bar)
 
@@ -859,6 +1056,10 @@ class ImageEditor(QMainWindow):
         self.graphics_scene = QGraphicsScene(self)
         self.graphics_scene.selectionChanged.connect(self._update_annotation_controls)
         self.graphics_view = CanvasGraphicsView(self.graphics_scene, self)
+        self.graphics_view.box_drawn.connect(self._on_box_drawn)
+        self.graphics_view.draw_mode_cancelled.connect(
+            lambda: self.add_box_mode_button.setChecked(False)
+        )
         self.graphics_view.setObjectName("centralView")
         self.graphics_view.setFrameShape(QFrame.NoFrame)
         self.graphics_view.setRenderHint(QPainter.Antialiasing, True)
@@ -873,6 +1074,45 @@ class ImageEditor(QMainWindow):
         splitter.addWidget(self.canvas_host)
 
         splitter.setSizes([SPLITTER_SIZES[0], SPLITTER_SIZES[1] + SPLITTER_SIZES[2]])
+        right_panel = QFrame(self)
+        right_panel.setObjectName("panelCard")
+        right_panel.setMinimumWidth(PANEL_LAYERS_MIN_WIDTH)
+        right_panel.setMaximumWidth(PANEL_LAYERS_MAX_WIDTH)
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(14, 14, 14, 14)
+        right_layout.setSpacing(10)
+
+        self.sidebar_page_label = QLabel("Нет выбранной страницы", right_panel)
+        self.sidebar_page_label.setObjectName("panelSubTitle")
+        self.sidebar_page_label.setWordWrap(True)
+        right_layout.addWidget(self.sidebar_page_label)
+
+        self.right_tabs = QTabWidget(right_panel)
+        self.right_tabs.setObjectName("rightTabs")
+        self.right_tabs.setDocumentMode(True)
+        self.tree_widget = LayerTreeWidget()
+        self.tree_widget.itemSelectionChanged.connect(
+            self._on_tree_selection_changed
+        )
+        self.statistics_panel = StatisticsPanel(self)
+        self.thumbnails_panel = ThumbnailsPanel(self)
+        self.thumbnails_panel.image_selected.connect(self._select_page)
+
+        self.right_tabs.addTab(self.tree_widget, "Слои")
+        self.right_tabs.addTab(self.statistics_panel, "Статистика")
+        right_layout.addWidget(self.right_tabs, 1)
+
+        separator = QFrame(right_panel)
+        separator.setFrameShape(QFrame.HLine)
+        separator.setFrameShadow(QFrame.Sunken)
+        right_layout.addWidget(separator)
+
+        self.detail_panel = SeedlingDetailPanel(right_panel)
+        self.detail_panel.navigate.connect(self._navigate_seedling)
+        right_layout.addWidget(self.detail_panel)
+
+        splitter.addWidget(right_panel)
+        splitter.setSizes(SPLITTER_SIZES)
         self._set_canvas_empty(True)
         self._update_canvas_status()
         self._update_annotation_controls()
@@ -892,7 +1132,7 @@ class ImageEditor(QMainWindow):
         layout.addWidget(title)
 
         hint = QLabel(
-            "После загрузки можно найти растения, классифицировать части и "
+            "После загрузки можно найти растения, сегментировать части и "
             "сохранить PDF-отчет.",
             empty_state,
         )
@@ -1509,6 +1749,130 @@ class ImageEditor(QMainWindow):
         self.confirm_box_button.setEnabled(has_pending_box)
         self.cancel_box_button.setEnabled(True)
 
+    def _toggle_add_box_mode(self, enabled: bool) -> None:
+        """Включает/выключает режим рисования боксов на канвасе."""
+        self.graphics_view.set_draw_mode(enabled)
+        if enabled:
+            self.view_mode_button.setChecked(False)
+            self.edit_boxes_mode_button.setChecked(False)
+            self.edit_masks_mode_button.setChecked(False)
+        else:
+            self.view_mode_button.setChecked(True)
+
+    def _on_box_drawn(self, scene_rect) -> None:
+        """Обрабатывает нарисованный прямоугольник — показывает диалог выбора класса."""
+        from seeding.ui.add_box_dialog import AddBoxDialog
+
+        self.add_box_mode_button.setChecked(False)
+
+        page_idx = self._active_image_index
+        if not self.image_storage.images or page_idx >= len(self.image_storage.images):
+            return
+
+        offset_x = offset_y = 0.0
+        if self._pixmap_item is not None:
+            p = self._pixmap_item.pos()
+            offset_x, offset_y = p.x(), p.y()
+
+        page_img = self.image_storage.images[page_idx]
+        if not isinstance(page_img, np.ndarray):
+            logger.warning("_on_box_drawn: page image is not ndarray, skipping")
+            return
+        img_h, img_w = page_img.shape[:2]
+
+        x1 = max(0, int(scene_rect.left() - offset_x))
+        y1 = max(0, int(scene_rect.top() - offset_y))
+        x2 = min(img_w, int(scene_rect.right() - offset_x))
+        y2 = min(img_h, int(scene_rect.bottom() - offset_y))
+
+        if x2 <= x1 or y2 <= y1:
+            return
+
+        dlg = AddBoxDialog(self)
+        if dlg.exec_() != dlg.Accepted:
+            return
+        class_name = dlg.selected_class()
+        if class_name is None:
+            return
+
+        self._create_manual_object(page_idx, class_name, (x1, y1, x2, y2))
+
+    def _create_manual_object(
+        self,
+        page_idx: int,
+        class_name: str,
+        bbox: tuple[int, int, int, int],
+    ) -> None:
+        """Создаёт ObjectImage или AllClassImage по нарисованному боксу."""
+        from seeding.mask_refiner import refine_mask_bitmap, bitmap_to_polygon
+
+        page_img = self.image_storage.images[page_idx]
+        if not isinstance(page_img, np.ndarray):
+            return
+
+        x1, y1, x2, y2 = bbox
+        crop = page_img[y1:y2, x1:x2].copy()
+
+        h, w = crop.shape[:2]
+        coarse = np.full((h, w), 255, dtype=np.uint8)
+        mask_bitmap = refine_mask_bitmap(crop, coarse)
+        mask_polygon = bitmap_to_polygon(mask_bitmap) if mask_bitmap is not None else None
+
+        if class_name == "seeding":
+            obj = ObjectImage(
+                class_name=class_name,
+                confidence=1.0,
+                image=[crop],
+                image_all_class=[],
+                bbox=bbox,
+                manual=True,
+            )
+            if self.image_storage.class_object_image is None:
+                self.image_storage.class_object_image = [
+                    [] for _ in self.image_storage.images
+                ]
+            while len(self.image_storage.class_object_image) <= page_idx:
+                self.image_storage.class_object_image.append([])
+            self.image_storage.class_object_image[page_idx].append(obj)
+        else:
+            page_objects = []
+            if (self.image_storage.class_object_image
+                    and page_idx < len(self.image_storage.class_object_image)):
+                page_objects = self.image_storage.class_object_image[page_idx]
+
+            target_obj = None
+            selected = self.app_state.selected_item or {}
+            if selected.get("type") in {"seeding", "class"}:
+                seed_idx = int(selected.get("seeding_index", selected.get("index", 0)))
+                if seed_idx < len(page_objects):
+                    target_obj = page_objects[seed_idx]
+
+            if target_obj is None and page_objects:
+                target_obj = page_objects[-1]
+
+            if target_obj is None:
+                QMessageBox.information(
+                    self, "Нет сеянца",
+                    "Сначала выбери сеянец в дереве, к которому добавить эту часть."
+                )
+                return
+
+            part = AllClassImage(
+                class_name=class_name,
+                confidence=1.0,
+                image=crop,
+                bbox=bbox,
+                mask_polygon=mask_polygon,
+                mask_bitmap=mask_bitmap,
+                manual=True,
+            )
+            if target_obj.image_all_class is None:
+                target_obj.image_all_class = []
+            target_obj.image_all_class.append(part)
+
+        self._refresh_tree()
+        self.display_image_with_boxes(page_idx)
+
     def _build_toolbar(self) -> None:
         """Создаёт верхний toolbar с основными действиями приложения."""
         toolbar = QToolBar("Main", self)
@@ -1565,6 +1929,9 @@ class ImageEditor(QMainWindow):
                 ("Сегментировать только новые", self.classify_new_only),
                 ("Сегментировать все заново", self.classify),
             ],
+            "Сегментация",
+            self.classify,
+            shortcut="Ctrl+C",
             fallback_standard_icon=QStyle.SP_FileDialogDetailedView,
         )
         self.action_rotate = self._create_action(
@@ -2042,7 +2409,7 @@ class ImageEditor(QMainWindow):
             return None
 
     def _ensure_classify_model(self) -> InferenceBackend | None:
-        """Лениво загружает модель классификации частей и возвращает её экземпляр."""
+        """Лениво загружает модель сегментации частей и возвращает её экземпляр."""
         if self.classify_model is not None:
             return self.classify_model
         try:
@@ -2050,12 +2417,12 @@ class ImageEditor(QMainWindow):
             return self.classify_model
         except Exception as error:
             self._log_error(
-                "Не удалось загрузить модель классификации: "
+                "Не удалось загрузить модель сегментации: "
                 f"{self.classify_weights_path}. Ошибка: {error}"
             )
-            logger.exception("Не удалось загрузить модель классификации")
+            logger.exception("Не удалось загрузить модель сегментации")
             self._show_error(
-                "Ошибка модели классификации",
+                "Ошибка модели сегментации",
                 (
                     "Не удалось загрузить модель:\n"
                     f"{self.classify_weights_path}\n\n{error}"
@@ -2169,6 +2536,36 @@ class ImageEditor(QMainWindow):
                 progress.setRange(0, total)
                 progress.setStep(f"Page {done} of {total}...")
                 progress.setValue(done)
+            doc = fitz.open(pdf_path)
+            total = int(doc.page_count)
+            progress = TaskProgressDialog(
+                "Загрузка PDF",
+                "Подготавливаем страницы документа...",
+                maximum=total,
+                parent=self,
+            )
+            progress.show()
+
+            for page_num in range(total):
+                if progress.was_canceled():
+                    break
+                page = doc.load_page(page_num)
+                pix = page.get_pixmap(
+                    matrix=fitz.Matrix(
+                        PDF_RENDER_SCALE_DEFAULT,
+                        PDF_RENDER_SCALE_DEFAULT,
+                    )
+                )
+                image = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+                    pix.height,
+                    pix.width,
+                    pix.n,
+                )
+                if pix.n == 4:
+                    image = image[:, :, :3].copy()
+                image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+                pages.append(self._append_page(image, pdf_path))
+                progress.set_progress(page_num + 1)
 
             loaded_pages = load_pages_from_path(
                 pdf_path,
@@ -2268,6 +2665,7 @@ class ImageEditor(QMainWindow):
                     "seeding",
                     obj.image[0] if obj.image else None,
                     confidence=obj.confidence,
+                    manual=getattr(obj, "manual", False),
                 )
                 if getattr(obj, "orientation_uncertain", False):
                     child.setIcon(
@@ -2283,6 +2681,8 @@ class ImageEditor(QMainWindow):
                         object_index,
                         class_index,
                         confidence=part.confidence,
+                        manual=getattr(part, "manual", False),
+                        class_name=part.class_name,
                     )
                 child.setExpanded(False)
             root.setExpanded(page_index == active)
@@ -2328,6 +2728,7 @@ class ImageEditor(QMainWindow):
         """Переключает отображение по выбору пользователя в дереве слоёв."""
         item = self.tree_widget.currentItem()
         if item is None:
+            self.detail_panel.clear()
             return
         payload = item.data(0, Qt.UserRole) or {}
         item_type = payload.get("type")
@@ -2335,18 +2736,115 @@ class ImageEditor(QMainWindow):
 
         if item_type in {"original", "pdf"}:
             self._select_page(int(payload["index"]))
+            self.detail_panel.clear()
             return
         if item_type == "seeding":
             self.display_image_with_boxes(
                 int(payload["parent_index"]),
                 seeding_idx=int(payload["index"]),
             )
+            self._update_detail_panel(payload)
             return
         if item_type == "class":
             self.display_image_with_boxes(
                 int(payload["parent_index"]),
                 seeding_idx=int(payload["seeding_index"]),
             )
+            self._update_detail_panel(payload)
+
+    def _update_detail_panel(self, payload: dict) -> None:
+        """Заполняет детальную панель данными выбранного объекта."""
+        item_type = payload.get("type")
+        page_idx = int(payload.get("parent_index", 0))
+
+        page_objects = []
+        if (self.image_storage.class_object_image
+                and page_idx < len(self.image_storage.class_object_image)):
+            page_objects = self.image_storage.class_object_image[page_idx]
+
+        if item_type == "seeding":
+            seed_idx = int(payload["index"])
+            if seed_idx >= len(page_objects):
+                self.detail_panel.clear()
+                return
+            obj = page_objects[seed_idx]
+            crop = obj.image[0] if obj.image and isinstance(obj.image[0], np.ndarray) else None
+            self.detail_panel.set_object(
+                name=self._display_part_name(obj.class_name),
+                confidence=obj.confidence,
+                manual=getattr(obj, "manual", False),
+                crop_image=crop,
+                mask_bitmap=None,
+                mask_color=(78, 200, 100),
+                bbox=obj.bbox,
+                pixels_per_mm=self.pixels_per_mm,
+            )
+            return
+
+        if item_type == "class":
+            seed_idx = int(payload["seeding_index"])
+            class_idx = int(payload["class_index"])
+            if seed_idx >= len(page_objects):
+                self.detail_panel.clear()
+                return
+            obj = page_objects[seed_idx]
+            parts = obj.image_all_class or []
+            if class_idx >= len(parts):
+                self.detail_panel.clear()
+                return
+            part = parts[class_idx]
+
+            crop = None
+            if obj.image and isinstance(obj.image[0], np.ndarray) and part.bbox:
+                seed_crop = obj.image[0]
+                x1, y1, x2, y2 = part.bbox
+                sx1, sy1 = (obj.bbox[0], obj.bbox[1]) if obj.bbox else (0, 0)
+                rx1 = max(0, x1 - sx1)
+                ry1 = max(0, y1 - sy1)
+                rx2 = min(seed_crop.shape[1], x2 - sx1)
+                ry2 = min(seed_crop.shape[0], y2 - sy1)
+                if rx2 > rx1 and ry2 > ry1:
+                    crop = seed_crop[ry1:ry2, rx1:rx2]
+
+            fill_color, _ = self._part_mask_colors(part.class_name)
+            mask_color = (fill_color.red(), fill_color.green(), fill_color.blue())
+            fallback_crop = obj.image[0] if obj.image and isinstance(obj.image[0], np.ndarray) else None
+            self.detail_panel.set_object(
+                name=self._display_part_name(part.class_name),
+                confidence=part.confidence,
+                manual=getattr(part, "manual", False),
+                crop_image=crop if (crop is not None and crop.size > 0) else fallback_crop,
+                mask_bitmap=getattr(part, "mask_bitmap", None),
+                mask_color=mask_color,
+                bbox=part.bbox,
+                pixels_per_mm=self.pixels_per_mm,
+            )
+
+    def _navigate_seedling(self, delta: int) -> None:
+        """Переключает выбор на следующий/предыдущий сеянец (delta = +1 или -1)."""
+        item = self.tree_widget.currentItem()
+        if item is None:
+            return
+        payload = item.data(0, Qt.UserRole) or {}
+        item_type = payload.get("type")
+
+        if item_type == "class":
+            item = item.parent()
+            if item is None:
+                return
+            payload = item.data(0, Qt.UserRole) or {}
+
+        if payload.get("type") != "seeding":
+            return
+
+        parent_item = item.parent()
+        if parent_item is None:
+            return
+        current_row = parent_item.indexOfChild(item)
+        new_row = current_row + delta
+        if 0 <= new_row < parent_item.childCount():
+            new_item = parent_item.child(new_row)
+            self.tree_widget.setCurrentItem(new_item)
 
     def display_image(
         self,
@@ -2564,50 +3062,35 @@ class ImageEditor(QMainWindow):
         fill_color: QColor,
         outline_color: QColor,
     ) -> None:
-        """Рендерит bitmap-маску как полупрозрачный цветной overlay + контур."""
-        h, w = bitmap.shape[:2]
-        binary = (bitmap > 0).astype(np.uint8)
+        """Рендерит bitmap-маску как QPainterPath с OddEvenFill.
+
+        Дыры (просветы между хвоинками/корнями) автоматически прозрачны —
+        путь строится по всем контурам через RETR_CCOMP.
+        """
+        binary = (bitmap > 0).astype(np.uint8) * 255
         if not np.any(binary):
             return
 
-        # RGBA overlay: где маска=1, кладём цвет заливки с его alpha
-        rgba = np.zeros((h, w, 4), dtype=np.uint8)
-        mask_idx = binary > 0
-        rgba[mask_idx, 0] = fill_color.red()
-        rgba[mask_idx, 1] = fill_color.green()
-        rgba[mask_idx, 2] = fill_color.blue()
-        rgba[mask_idx, 3] = fill_color.alpha()
+        contours = bitmap_to_contours(binary)
+        if not contours:
+            return
 
-        # Contiguous + правильный stride для QImage
-        rgba = np.ascontiguousarray(rgba)
-        qimage = QImage(
-            rgba.data, w, h, w * 4, QImage.Format_RGBA8888
-        ).copy()  # .copy() — чтобы не держать ссылку на numpy-буфер
-        pixmap = QPixmap.fromImage(qimage)
-        pix_item = self.graphics_scene.addPixmap(pixmap)
-        pix_item.setAcceptedMouseButtons(Qt.NoButton)
-        pix_item.setZValue(0.5)
-        self.mask_items.append(pix_item)
-
-        # Контуры всех компонент связности
-        contours, _ = cv2.findContours(
-            binary * 255, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-        )
+        path = QPainterPath()
+        path.setFillRule(Qt.OddEvenFill)
         for contour in contours:
-            if len(contour) < 3:
-                continue
-            pts = contour.reshape(-1, 2)
-            q_polygon = QPolygonF(
-                [QPointF(float(x), float(y)) for x, y in pts]
-            )
-            outline_item = self.graphics_scene.addPolygon(
-                q_polygon,
-                QPen(outline_color, 1.5),
-                QBrush(Qt.transparent),
-            )
-            outline_item.setAcceptedMouseButtons(Qt.NoButton)
-            outline_item.setZValue(0.6)
-            self.mask_items.append(outline_item)
+            poly = QPolygonF([QPointF(float(x), float(y)) for x, y in contour])
+            sub = QPainterPath()
+            sub.addPolygon(poly)
+            sub.closeSubpath()
+            path.addPath(sub)
+
+        path_item = QGraphicsPathItem(path)
+        path_item.setPen(QPen(outline_color, 1.5))
+        path_item.setBrush(QBrush(fill_color))
+        path_item.setAcceptedMouseButtons(Qt.NoButton)
+        path_item.setZValue(0.5)
+        self.graphics_scene.addItem(path_item)
+        self.mask_items.append(path_item)
 
     def _selection_payload_for_display(
         self,
@@ -3160,6 +3643,18 @@ class ImageEditor(QMainWindow):
             lambda result: self._on_detection_worker_done(
                 progress, result, on_complete
             )
+        image = self.image_storage.images[self._active_image_index]
+        progress = TaskProgressDialog(
+            "Поиск сеянцев",
+            "Анализируем текущую страницу...",
+            maximum=1,
+            parent=self,
+        )
+        progress.cancel_button.setEnabled(False)
+        progress.show()
+        results = model.predict(
+            image,
+            conf_threshold=DETECTION_CONFIDENCE_THRESHOLD,
         )
         thread.error.connect(lambda error: self._on_analysis_worker_error(progress, error))
         thread.finished.connect(thread.deleteLater)
@@ -3212,6 +3707,11 @@ class ImageEditor(QMainWindow):
         thread.start()
 
     def _on_detection_worker_done(self, progress, result, on_complete) -> None:
+        progress.set_progress(
+            1,
+            message="Поиск сеянцев завершён.",
+            detail=f"Найдено объектов: {len(objects)}",
+        )
         progress.close()
         self._refresh_tree()
         self._refresh_statistics_panel()
@@ -3293,6 +3793,21 @@ class ImageEditor(QMainWindow):
                 self.image_storage.class_object_image
                 and page_index < len(self.image_storage.class_object_image)
                 and self.image_storage.class_object_image[page_index]
+        progress = TaskProgressDialog(
+            "Поиск сеянцев",
+            "Выполняем поиск на всех страницах проекта...",
+            maximum=total,
+            parent=self,
+        )
+        progress.show()
+
+        processed = 0
+        for page_index, image in enumerate(self.image_storage.images):
+            if progress.was_canceled():
+                break
+            results = model.predict(
+                image,
+                conf_threshold=DETECTION_CONFIDENCE_THRESHOLD,
             )
         ]
         if not pages_to_process:
@@ -3310,6 +3825,8 @@ class ImageEditor(QMainWindow):
             self.statusBar().showMessage(
                 f"Поиск завершён: обработано {processed} новых страниц", 3000
             )
+            processed += 1
+            progress.set_progress(processed, detail=f"Страница {page_index + 1} из {total}")
 
         self._start_detection_worker(
             pages_to_process,
@@ -3367,6 +3884,7 @@ class ImageEditor(QMainWindow):
 
     def classify(self) -> None:
         """Классифицирует части растений в найденных объектах в фоне."""
+        """Сегментирует части растений внутри найденных объектов проекта."""
         if not self.image_storage.class_object_image or not any(
             self.image_storage.class_object_image
         ):
@@ -3401,6 +3919,16 @@ class ImageEditor(QMainWindow):
             title="Сегментация частей",
             on_complete=on_complete,
         )
+        total_objects = sum(
+            len(objects) for objects in self.image_storage.class_object_image or []
+        )
+        progress = TaskProgressDialog(
+            "Сегментация",
+            "Сегментируем части найденных сеянцев...",
+            maximum=total_objects,
+            parent=self,
+        )
+        progress.show()
 
     def classify_new_only(self) -> None:
         """Сегментирует только сеянцы без существующих результатов, в фоне."""
@@ -3442,6 +3970,34 @@ class ImageEditor(QMainWindow):
             title="Сегментация (новые)",
             on_complete=on_complete,
         )
+            for object_index, obj in enumerate(objects):
+                if progress.was_canceled():
+                    progress.close()
+                    self._refresh_tree()
+                    self._refresh_statistics_panel()
+                    self._restore_display(preserve_view=True)
+                    return
+                if not obj.image:
+                    continue
+                results = model.predict(obj.image[0])
+                run_classification_for_selection(
+                    self.app_state,
+                    page_index,
+                    object_index,
+                    results,
+                )
+                processed += 1
+                progress.set_progress(processed, detail=f"Объект {processed} из {total_objects}")
+
+        progress.close()
+        self._refresh_tree()
+        self._refresh_statistics_panel()
+        self._restore_display(preserve_view=True)
+        self._log_action(
+            "run_analysis",
+            f"Сегментация завершена; обработано объектов: {processed}",
+        )
+        self.statusBar().showMessage("Сегментация завершена", 3000)
 
     def rotate_image(self) -> None:
         """Поворачивает текущую страницу или выбранный кроп и обновляет отображение."""

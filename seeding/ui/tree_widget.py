@@ -3,7 +3,15 @@
 from __future__ import annotations
 
 from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import QAbstractItemView, QHeaderView, QTreeWidget, QTreeWidgetItem
+
+_CLASS_ICONS: dict[str, str] = {
+    "root": "🫚",
+    "stem": "🌿",
+    "flower": "🌸",
+    "inflorescence": "🌸",
+}
 
 
 class LayerTreeWidget(QTreeWidget):
@@ -56,11 +64,13 @@ class LayerTreeWidget(QTreeWidget):
         image_type: str,
         image,
         confidence: float | None = None,
+        manual: bool = False,
     ) -> QTreeWidgetItem:
-        """Добавляет в дерево узел найденного сеянца с индексами и confidence."""
+        """Добавляет узел сеянца с иконкой, подсветкой низкого confidence и флагом ручного объекта."""
         _ = (image_type, image)
         child = QTreeWidgetItem(parent)
-        child.setText(0, name)
+        prefix = "✏ " if manual else "🌱 "
+        child.setText(0, prefix + name)
         child.setText(1, description)
         child.setData(
             0,
@@ -69,6 +79,15 @@ class LayerTreeWidget(QTreeWidget):
         )
         if confidence is not None:
             child.setData(1, self.CONFIDENCE_ROLE, float(confidence))
+            if float(confidence) < 0.5:
+                warn_color = QColor(80, 40, 10, 180)
+                child.setBackground(0, warn_color)
+                child.setBackground(1, warn_color)
+                child.setForeground(0, QColor(255, 150, 80))
+                child.setText(0, "⚠ " + prefix + name)
+            else:
+                child.setBackground(0, QColor(0, 0, 0, 0))
+                child.setBackground(1, QColor(0, 0, 0, 0))
         parent.addChild(child)
         return child
 
@@ -81,10 +100,15 @@ class LayerTreeWidget(QTreeWidget):
         seeding_index: int,
         class_index: int,
         confidence: float | None = None,
+        manual: bool = False,
+        class_name: str | None = None,
     ) -> QTreeWidgetItem:
-        """Добавляет узел классифицированной части растения в дерево слоёв."""
+        """Добавляет узел части растения с иконкой по классу."""
         child = QTreeWidgetItem(parent)
-        child.setText(0, name)
+        lookup_key = (class_name or name or "").strip().lower()
+        icon = _CLASS_ICONS.get(lookup_key, "🔹")
+        prefix = "✏ " if manual else icon + " "
+        child.setText(0, prefix + name)
         child.setText(1, description)
         child.setData(
             0,
@@ -98,5 +122,13 @@ class LayerTreeWidget(QTreeWidget):
         )
         if confidence is not None:
             child.setData(1, self.CONFIDENCE_ROLE, float(confidence))
+            if float(confidence) < 0.5:
+                warn_color = QColor(80, 40, 10, 180)
+                child.setBackground(0, warn_color)
+                child.setBackground(1, warn_color)
+                child.setForeground(0, QColor(255, 150, 80))
+            else:
+                child.setBackground(0, QColor(0, 0, 0, 0))
+                child.setBackground(1, QColor(0, 0, 0, 0))
         parent.addChild(child)
         return child
