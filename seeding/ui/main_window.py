@@ -62,7 +62,6 @@ from PyQt5.QtWidgets import (
     QStackedLayout,
     QStackedWidget,
     QStyle,
-    QTabWidget,
     QToolBar,
     QToolButton,
     QVBoxLayout,
@@ -77,8 +76,6 @@ from seeding.config import (
     DETECTION_CLASS_NAMES,
     DETECTION_CONFIDENCE_THRESHOLD,
     DETECTION_IOU_THRESHOLD,
-    PANEL_LAYERS_MAX_WIDTH,
-    PANEL_LAYERS_MIN_WIDTH,
     QSETTINGS_APP,
     QSETTINGS_ORG,
     ROTATE_ANGLE_DEG,
@@ -124,7 +121,6 @@ from seeding.services import (
 )
 from seeding.session_service import load_session
 from seeding.ui.bbox_item import BBoxItem
-from seeding.ui.detail_panel import SeedlingDetailPanel
 from seeding.ui.icon_manager import IconManager
 from seeding.ui.session_actions import (
     auto_save_current_session,
@@ -1041,43 +1037,6 @@ class ImageEditor(QMainWindow):
         splitter.addWidget(self.canvas_host)
 
         splitter.setSizes([SPLITTER_SIZES[0], SPLITTER_SIZES[1] + SPLITTER_SIZES[2]])
-        right_panel = QFrame(self)
-        right_panel.setObjectName("panelCard")
-        right_panel.setMinimumWidth(PANEL_LAYERS_MIN_WIDTH)
-        right_panel.setMaximumWidth(PANEL_LAYERS_MAX_WIDTH)
-        right_layout = QVBoxLayout(right_panel)
-        right_layout.setContentsMargins(14, 14, 14, 14)
-        right_layout.setSpacing(10)
-
-        self.sidebar_page_label = QLabel("Нет выбранной страницы", right_panel)
-        self.sidebar_page_label.setObjectName("panelSubTitle")
-        self.sidebar_page_label.setWordWrap(True)
-        right_layout.addWidget(self.sidebar_page_label)
-
-        self.right_tabs = QTabWidget(right_panel)
-        self.right_tabs.setObjectName("rightTabs")
-        self.right_tabs.setDocumentMode(True)
-        self.tree_widget = LayerTreeWidget()
-        self.tree_widget.itemSelectionChanged.connect(
-            self._on_tree_selection_changed
-        )
-        self.statistics_panel = StatisticsPanel(self)
-
-        self.right_tabs.addTab(self.tree_widget, "Слои")
-        self.right_tabs.addTab(self.statistics_panel, "Статистика")
-        right_layout.addWidget(self.right_tabs, 1)
-
-        separator = QFrame(right_panel)
-        separator.setFrameShape(QFrame.HLine)
-        separator.setFrameShadow(QFrame.Sunken)
-        right_layout.addWidget(separator)
-
-        self.detail_panel = SeedlingDetailPanel(right_panel)
-        self.detail_panel.navigate.connect(self._navigate_seedling)
-        right_layout.addWidget(self.detail_panel)
-
-        splitter.addWidget(right_panel)
-        splitter.setSizes(SPLITTER_SIZES)
         self._set_canvas_empty(True)
         self._update_canvas_status()
         self._update_annotation_controls()
@@ -2659,7 +2618,6 @@ class ImageEditor(QMainWindow):
         """Переключает отображение по выбору пользователя в дереве слоёв."""
         item = self.tree_widget.currentItem()
         if item is None:
-            self.detail_panel.clear()
             return
         payload = item.data(0, Qt.UserRole) or {}
         item_type = payload.get("type")
@@ -2667,24 +2625,23 @@ class ImageEditor(QMainWindow):
 
         if item_type in {"original", "pdf"}:
             self._select_page(int(payload["index"]))
-            self.detail_panel.clear()
             return
         if item_type == "seeding":
             self.display_image_with_boxes(
                 int(payload["parent_index"]),
                 seeding_idx=int(payload["index"]),
             )
-            self._update_detail_panel(payload)
             return
         if item_type == "class":
             self.display_image_with_boxes(
                 int(payload["parent_index"]),
                 seeding_idx=int(payload["seeding_index"]),
             )
-            self._update_detail_panel(payload)
 
     def _update_detail_panel(self, payload: dict) -> None:
         """Заполняет детальную панель данными выбранного объекта."""
+        if not hasattr(self, "detail_panel"):
+            return
         item_type = payload.get("type")
         page_idx = int(payload.get("parent_index", 0))
 
@@ -2696,7 +2653,6 @@ class ImageEditor(QMainWindow):
         if item_type == "seeding":
             seed_idx = int(payload["index"])
             if seed_idx >= len(page_objects):
-                self.detail_panel.clear()
                 return
             obj = page_objects[seed_idx]
             crop = obj.image[0] if obj.image and isinstance(obj.image[0], np.ndarray) else None
@@ -2716,12 +2672,10 @@ class ImageEditor(QMainWindow):
             seed_idx = int(payload["seeding_index"])
             class_idx = int(payload["class_index"])
             if seed_idx >= len(page_objects):
-                self.detail_panel.clear()
                 return
             obj = page_objects[seed_idx]
             parts = obj.image_all_class or []
             if class_idx >= len(parts):
-                self.detail_panel.clear()
                 return
             part = parts[class_idx]
 

@@ -5,7 +5,7 @@ import cv2
 import numpy as np
 import pytest
 from PyQt5.QtCore import QPointF, QRectF, QSettings, Qt
-from PyQt5.QtWidgets import QApplication, QGraphicsItem
+from PyQt5.QtWidgets import QApplication, QGraphicsItem, QSplitter
 
 from seeding.auth import AuthUser
 from seeding.config import QSETTINGS_APP, QSETTINGS_ORG
@@ -904,6 +904,15 @@ def test_tools_stack_view_mode(main_window):
     """В режиме Просмотр стек показывает страницу 0."""
     main_window._set_interaction_mode("view")
     assert main_window.tools_stack.currentIndex() == 0
+
+
+def test_main_window_uses_local_two_panel_layout(main_window):
+    """The project tree must stay in the left panel without a duplicate right sidebar."""
+    splitter = main_window.findChild(QSplitter)
+
+    assert splitter is not None
+    assert splitter.count() == 2
+    assert not hasattr(main_window, "right_tabs")
 
 
 def test_tools_stack_edit_boxes_mode(main_window):
