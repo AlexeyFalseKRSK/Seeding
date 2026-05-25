@@ -5,9 +5,8 @@ from __future__ import annotations
 import cv2
 import numpy as np
 from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QColor, QImage, QPixmap
+from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import (
-    QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,

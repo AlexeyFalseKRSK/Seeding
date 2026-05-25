@@ -1,6 +1,7 @@
 # tests/test_models_manual_flag.py
-from seeding.models import AllClassImage, ObjectImage
 import numpy as np
+
+from seeding.models import AllClassImage, ObjectImage
 
 
 def test_object_image_manual_defaults_to_false():

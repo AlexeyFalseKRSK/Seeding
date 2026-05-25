@@ -3,6 +3,7 @@ import time
 
 import cv2
 import numpy as np
+import pytest
 from PyQt5.QtCore import QPointF, QRectF, QSettings, Qt
 from PyQt5.QtWidgets import QApplication, QGraphicsItem
 
@@ -878,7 +879,6 @@ def test_calibration_restores_per_source_file(tmp_path):
         app.quit()
 
 
-import pytest
 
 
 @pytest.fixture

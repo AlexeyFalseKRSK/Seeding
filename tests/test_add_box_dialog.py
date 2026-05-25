@@ -1,6 +1,8 @@
 # tests/test_add_box_dialog.py
 import os
+
 from PyQt5.QtWidgets import QApplication
+
 from seeding.ui.add_box_dialog import AddBoxDialog
 
 

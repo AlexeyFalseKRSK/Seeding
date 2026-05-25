@@ -1,6 +1,6 @@
 import numpy as np
 
-from seeding.mask_refiner import build_refine_context, refine_mask_bitmap
+from seeding.mask_refiner import bitmap_to_contours, build_refine_context, refine_mask_bitmap
 
 
 def test_refine_mask_bitmap_suppresses_grid_lines():
@@ -76,7 +76,6 @@ def test_refine_mask_bitmap_context_matches_uncached_result():
     assert uncached is not None
     assert cached is not None
     assert np.array_equal(cached, uncached)
-from seeding.mask_refiner import bitmap_to_contours
 
 
 def _make_bitmap_with_hole():

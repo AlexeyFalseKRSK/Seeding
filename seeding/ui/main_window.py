@@ -38,7 +38,6 @@ from PyQt5.QtWidgets import (
     QAction,
     QApplication,
     QDialog,
-    QFrame,
     QFileDialog,
     QFrame,
     QGraphicsItem,
@@ -57,13 +56,13 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
-    QProgressBar,
     QShortcut,
     QSizePolicy,
     QSplitter,
     QStackedLayout,
     QStackedWidget,
     QStyle,
+    QTabWidget,
     QToolBar,
     QToolButton,
     QVBoxLayout,
@@ -71,7 +70,6 @@ from PyQt5.QtWidgets import (
 )
 
 from seeding.auth import AuthUser
-from seeding.mask_refiner import bitmap_to_contours
 from seeding.config import (
     CALIBRATION_PIXELS_PER_MM_DEFAULT,
     CLASS_DISPLAY_NAMES,
@@ -79,6 +77,8 @@ from seeding.config import (
     DETECTION_CLASS_NAMES,
     DETECTION_CONFIDENCE_THRESHOLD,
     DETECTION_IOU_THRESHOLD,
+    PANEL_LAYERS_MAX_WIDTH,
+    PANEL_LAYERS_MIN_WIDTH,
     QSETTINGS_APP,
     QSETTINGS_ORG,
     ROTATE_ANGLE_DEG,
@@ -97,6 +97,7 @@ from seeding.image_loader import (
 )
 from seeding.inference import InferenceBackend, load_inference_backend
 from seeding.mask_refiner import (
+    bitmap_to_contours,
     bitmap_to_polygon,
     build_refine_context,
     polygon_to_bitmap,
@@ -123,6 +124,7 @@ from seeding.services import (
 )
 from seeding.session_service import load_session
 from seeding.ui.bbox_item import BBoxItem
+from seeding.ui.detail_panel import SeedlingDetailPanel
 from seeding.ui.icon_manager import IconManager
 from seeding.ui.session_actions import (
     auto_save_current_session,
@@ -133,8 +135,6 @@ from seeding.ui.session_actions import (
 from seeding.ui.session_picker import SessionPickerDialog
 from seeding.ui.settings_dialog import AppSettingsDialog
 from seeding.ui.statistics_panel import StatisticsPanel
-from seeding.ui.thumbnails_panel import ThumbnailsPanel
-from seeding.ui.detail_panel import SeedlingDetailPanel
 from seeding.ui.tree_widget import LayerTreeWidget
 from seeding.user_service import record_user_action
 from seeding.utils import clip_bbox_to_image, rotate_bbox
@@ -751,39 +751,6 @@ class ImageEditor(QMainWindow):
     def _on_models_load_error(self, error_text: str) -> None:
         self.statusBar().showMessage("Ошибка загрузки моделей", 5000)
         logger.error("Не удалось предзагрузить модели: %s", error_text)
-    def preload_models(self) -> bool:
-        """Предзагружает модели детекции и сегментации после старта окна."""
-
-        progress = TaskProgressDialog(
-            "Подготовка моделей",
-            "Загружаем модели AI для детекции и сегментации...",
-            maximum=2,
-            parent=self,
-        )
-        progress.cancel_button.setEnabled(False)
-        progress.show()
-        QApplication.processEvents()
-
-        if self._ensure_detect_model() is None:
-            progress.close()
-            return False
-        progress.set_progress(
-            1,
-            message="Модель детекции готова.",
-            detail=Path(self.weights_path).name,
-        )
-
-        if self._ensure_classify_model() is None:
-            progress.close()
-            return False
-        progress.set_progress(
-            2,
-            message="Модель сегментации готова.",
-            detail=Path(self.classify_weights_path).name,
-        )
-        progress.close()
-        self.statusBar().showMessage("Модели загружены и готовы к работе", 3000)
-        return True
 
     def _log_action(self, action: str, details: str | None = None) -> None:
         """Сохраняет действие пользователя, не прерывая UI при ошибках логирования."""
@@ -1095,8 +1062,6 @@ class ImageEditor(QMainWindow):
             self._on_tree_selection_changed
         )
         self.statistics_panel = StatisticsPanel(self)
-        self.thumbnails_panel = ThumbnailsPanel(self)
-        self.thumbnails_panel.image_selected.connect(self._select_page)
 
         self.right_tabs.addTab(self.tree_widget, "Слои")
         self.right_tabs.addTab(self.statistics_panel, "Статистика")
@@ -1804,7 +1769,7 @@ class ImageEditor(QMainWindow):
         bbox: tuple[int, int, int, int],
     ) -> None:
         """Создаёт ObjectImage или AllClassImage по нарисованному боксу."""
-        from seeding.mask_refiner import refine_mask_bitmap, bitmap_to_polygon
+        from seeding.mask_refiner import bitmap_to_polygon, refine_mask_bitmap
 
         page_img = self.image_storage.images[page_idx]
         if not isinstance(page_img, np.ndarray):
@@ -1929,9 +1894,6 @@ class ImageEditor(QMainWindow):
                 ("Сегментировать только новые", self.classify_new_only),
                 ("Сегментировать все заново", self.classify),
             ],
-            "Сегментация",
-            self.classify,
-            shortcut="Ctrl+C",
             fallback_standard_icon=QStyle.SP_FileDialogDetailedView,
         )
         self.action_rotate = self._create_action(
@@ -2536,37 +2498,6 @@ class ImageEditor(QMainWindow):
                 progress.setRange(0, total)
                 progress.setStep(f"Page {done} of {total}...")
                 progress.setValue(done)
-            doc = fitz.open(pdf_path)
-            total = int(doc.page_count)
-            progress = TaskProgressDialog(
-                "Загрузка PDF",
-                "Подготавливаем страницы документа...",
-                maximum=total,
-                parent=self,
-            )
-            progress.show()
-
-            for page_num in range(total):
-                if progress.was_canceled():
-                    break
-                page = doc.load_page(page_num)
-                pix = page.get_pixmap(
-                    matrix=fitz.Matrix(
-                        PDF_RENDER_SCALE_DEFAULT,
-                        PDF_RENDER_SCALE_DEFAULT,
-                    )
-                )
-                image = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
-                    pix.height,
-                    pix.width,
-                    pix.n,
-                )
-                if pix.n == 4:
-                    image = image[:, :, :3].copy()
-                image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-                pages.append(self._append_page(image, pdf_path))
-                progress.set_progress(page_num + 1)
-
             loaded_pages = load_pages_from_path(
                 pdf_path,
                 on_progress=on_progress,
@@ -3643,18 +3574,6 @@ class ImageEditor(QMainWindow):
             lambda result: self._on_detection_worker_done(
                 progress, result, on_complete
             )
-        image = self.image_storage.images[self._active_image_index]
-        progress = TaskProgressDialog(
-            "Поиск сеянцев",
-            "Анализируем текущую страницу...",
-            maximum=1,
-            parent=self,
-        )
-        progress.cancel_button.setEnabled(False)
-        progress.show()
-        results = model.predict(
-            image,
-            conf_threshold=DETECTION_CONFIDENCE_THRESHOLD,
         )
         thread.error.connect(lambda error: self._on_analysis_worker_error(progress, error))
         thread.finished.connect(thread.deleteLater)
@@ -3707,11 +3626,6 @@ class ImageEditor(QMainWindow):
         thread.start()
 
     def _on_detection_worker_done(self, progress, result, on_complete) -> None:
-        progress.set_progress(
-            1,
-            message="Поиск сеянцев завершён.",
-            detail=f"Найдено объектов: {len(objects)}",
-        )
         progress.close()
         self._refresh_tree()
         self._refresh_statistics_panel()
@@ -3793,21 +3707,6 @@ class ImageEditor(QMainWindow):
                 self.image_storage.class_object_image
                 and page_index < len(self.image_storage.class_object_image)
                 and self.image_storage.class_object_image[page_index]
-        progress = TaskProgressDialog(
-            "Поиск сеянцев",
-            "Выполняем поиск на всех страницах проекта...",
-            maximum=total,
-            parent=self,
-        )
-        progress.show()
-
-        processed = 0
-        for page_index, image in enumerate(self.image_storage.images):
-            if progress.was_canceled():
-                break
-            results = model.predict(
-                image,
-                conf_threshold=DETECTION_CONFIDENCE_THRESHOLD,
             )
         ]
         if not pages_to_process:
@@ -3825,8 +3724,6 @@ class ImageEditor(QMainWindow):
             self.statusBar().showMessage(
                 f"Поиск завершён: обработано {processed} новых страниц", 3000
             )
-            processed += 1
-            progress.set_progress(processed, detail=f"Страница {page_index + 1} из {total}")
 
         self._start_detection_worker(
             pages_to_process,
@@ -3919,16 +3816,6 @@ class ImageEditor(QMainWindow):
             title="Сегментация частей",
             on_complete=on_complete,
         )
-        total_objects = sum(
-            len(objects) for objects in self.image_storage.class_object_image or []
-        )
-        progress = TaskProgressDialog(
-            "Сегментация",
-            "Сегментируем части найденных сеянцев...",
-            maximum=total_objects,
-            parent=self,
-        )
-        progress.show()
 
     def classify_new_only(self) -> None:
         """Сегментирует только сеянцы без существующих результатов, в фоне."""
@@ -3970,35 +3857,6 @@ class ImageEditor(QMainWindow):
             title="Сегментация (новые)",
             on_complete=on_complete,
         )
-            for object_index, obj in enumerate(objects):
-                if progress.was_canceled():
-                    progress.close()
-                    self._refresh_tree()
-                    self._refresh_statistics_panel()
-                    self._restore_display(preserve_view=True)
-                    return
-                if not obj.image:
-                    continue
-                results = model.predict(obj.image[0])
-                run_classification_for_selection(
-                    self.app_state,
-                    page_index,
-                    object_index,
-                    results,
-                )
-                processed += 1
-                progress.set_progress(processed, detail=f"Объект {processed} из {total_objects}")
-
-        progress.close()
-        self._refresh_tree()
-        self._refresh_statistics_panel()
-        self._restore_display(preserve_view=True)
-        self._log_action(
-            "run_analysis",
-            f"Сегментация завершена; обработано объектов: {processed}",
-        )
-        self.statusBar().showMessage("Сегментация завершена", 3000)
-
     def rotate_image(self) -> None:
         """Поворачивает текущую страницу или выбранный кроп и обновляет отображение."""
         if not self.image_storage.images:
