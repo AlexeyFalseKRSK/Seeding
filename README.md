@@ -1,272 +1,224 @@
 # Seeding
 
-![Python](https://img.shields.io/badge/Python-%3E%3D3.10-blue)
-![GUI](https://img.shields.io/badge/GUI-PyQt5-green)
-![YOLO](https://img.shields.io/badge/AI-Ultralytics%20YOLO-orange)
-![Tests](https://img.shields.io/badge/tests-pytest-yellowgreen)
-![License](https://img.shields.io/badge/license-MIT-lightgrey)
+Desktop application for seedling image analysis. Seeding helps an operator load
+photos or PDF scans, find seedlings with YOLO, segment plant parts, review and
+correct annotations, save analysis sessions, and generate PDF reports.
 
-Десктопное приложение Python/PyQt5 для анализа изображений посадочного материала с помощью моделей YOLO. Поддерживает детекцию сеянцев, сегментацию частей растений и формирование PDF-отчётов.
+## What It Does
 
----
+- Loads image files and PDF documents as project pages.
+- Detects seedlings on the current page or across the whole project.
+- Segments seedling parts such as root, stem, and inflorescence.
+- Shows bounding boxes and pixel masks on the image canvas.
+- Supports manual bbox creation, bbox editing, deletion, and re-segmentation.
+- Rotates pages and crops while keeping bbox coordinates and crops in sync.
+- Saves and restores sessions in a local SQLite database.
+- Preserves page rotation, crop rotation, manual flags, polygon masks, and bitmap masks.
+- Generates PDF reports with annotated images and measurement tables.
+- Supports local users, login, audit logs, and per-user session lists.
 
-## Содержание
+## Tech Stack
 
-- [Возможности](#возможности)
-- [Технологии](#технологии)
-- [Быстрый старт](#быстрый-старт)
-- [Конфигурация](#конфигурация)
-- [Рабочий процесс](#рабочий-процесс)
-- [Горячие клавиши](#горячие-клавиши)
-- [Управление пользователями](#управление-пользователями)
-- [Архитектура](#архитектура)
-- [Тестирование](#тестирование)
-- [Ограничения](#ограничения)
-- [Авторы](#авторы)
+- Python 3.10+
+- PyQt5 for the desktop UI
+- Ultralytics YOLO for detection and segmentation
+- OpenCV, NumPy, Pillow for image processing
+- PyMuPDF for PDF rendering
+- ReportLab for PDF report generation
+- SQLite for users, audit logs, sessions, detections, and plant parts
+- pytest and ruff for verification
 
----
+## Repository Layout
 
-## Возможности
+```text
+Seeding/
+├── seeding/
+│   ├── data/               # SQLite schema and local database location
+│   ├── resources/          # icons and QSS styles
+│   ├── ui/                 # PyQt widgets and main window
+│   ├── utils/              # geometry and path helpers
+│   ├── auth.py             # password hashing and verification
+│   ├── config.py           # paths, thresholds, UI constants
+│   ├── database.py         # SQLite schema initialization and CRUD
+│   ├── image_loader.py     # image/PDF loading and session image restore
+│   ├── inference.py        # YOLO backend abstraction
+│   ├── main.py             # application entry point
+│   ├── manage_users.py     # user management CLI
+│   ├── mask_refiner.py     # mask cleanup and bitmap/contour helpers
+│   ├── models.py           # AppState, ObjectImage, AllClassImage
+│   ├── report.py           # PDF report generation
+│   ├── services.py         # detection, segmentation, rotation logic
+│   ├── session_service.py  # save/load analysis sessions
+│   └── user_service.py     # users and audit log service
+├── tests/                  # pytest suite
+├── models/                 # local YOLO weights, not tracked by git
+├── Photo/                  # local working photos, not tracked by git
+├── README.md
+└── pyproject.toml
+```
 
-| Функция | Описание |
-|---------|---------|
-| Входные форматы | PNG, JPG, JPEG, BMP, TIFF, PDF |
-| Детекция | YOLO — обнаружение сеянцев на странице или всём документе |
-| Классификация | YOLO Segmentation — корень, стебель, соцветие с масками |
-| Редактирование | Интерактивный ресайз bbox и масок на холсте |
-| Поворот | Страниц и кропов с автоматическим пересчётом координат |
-| Калибровка | Инструмент измерения (пикселей/мм) |
-| Отчёт | PDF с аннотированными изображениями и таблицами |
-| Пользователи | Локальная БД SQLite, PBKDF2-HMAC-SHA256, аудит-лог |
-| CLI | Управление учётными записями через `seeding-users` |
+## Installation
 
----
+From the project root:
 
-## Технологии
-
-| Компонент | Библиотека |
-|-----------|-----------|
-| GUI | PyQt5 >= 5.15 |
-| Детекция и сегментация | Ultralytics YOLO >= 8.0 |
-| Обработка изображений | OpenCV >= 4.7, Pillow >= 9.4 |
-| Работа с PDF | PyMuPDF >= 1.22 |
-| Генерация отчётов | ReportLab >= 3.6 |
-| Вычисления | NumPy >= 1.23 |
-| База данных | SQLite3 (встроен) |
-
----
-
-## Быстрый старт
-
-**Требования:** Python 3.10+, файлы весов `.pt` (см. [Конфигурация](#конфигурация))
-
-```bash
-# 1. Клонировать
-git clone https://github.com/AlexeyFalseKRSK/Seeding.git
-cd Seeding
-
-# 2. Виртуальное окружение
+```powershell
 python -m venv .venv
-.venv\Scripts\activate          # Windows
-# source .venv/bin/activate     # Linux/macOS
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -e .
+python -m pip install pytest ruff
+```
 
-# 3. Установить зависимости
-pip install -e .
+The project expects YOLO `.pt` files to exist locally. By default:
 
-# 4. Создать пользователя
-python -m seeding.manage_users create admin
+```text
+models/bestDetectNew.pt
+models/bestKlassSegFlip180.pt
+```
 
-# 5. Запустить
+These model files are intentionally not tracked by git.
+
+## Configuration
+
+Model paths can be passed through CLI arguments:
+
+```powershell
+seeding --weights models\bestDetectNew.pt --classify-weights models\bestKlassSegFlip180.pt
+```
+
+Or through environment variables:
+
+```powershell
+$env:YOLO_WEIGHTS_PATH = "E:\models\bestDetectNew.pt"
+$env:YOLO_CLASSIFY_WEIGHTS_PATH = "E:\models\bestKlassSegFlip180.pt"
+$env:SEEDING_DB_PATH = "E:\data\seeding.sqlite3"
 seeding
 ```
 
----
+Useful environment variables:
 
-## Конфигурация
+| Variable | Purpose |
+| --- | --- |
+| `YOLO_WEIGHTS_PATH` | Detector weights path |
+| `YOLO_CLASSIFY_WEIGHTS_PATH` | Segmentation/classification weights path |
+| `YOLO_DEVICE` | YOLO device, for example `auto`, `cpu`, `0` |
+| `SEEDING_DB_PATH` | SQLite database path |
 
-### Пути к моделям
+## User Management
 
-| Параметр | Аргумент CLI | Переменная окружения | Значение по умолчанию |
-|---------|-------------|---------------------|----------------------|
-| Модель детекции | `--weights` | `YOLO_WEIGHTS_PATH` | `models/bestDetectNew.pt` |
-| Модель классификации | `--classify-weights` | `YOLO_CLASSIFY_WEIGHTS_PATH` | `models/bestKlassSegFlip180.pt` |
-| База данных | — | `SEEDING_DB_PATH` | `seeding/data/seeding.sqlite3` |
+Create at least one local user before opening the app:
 
-```bash
-# С явным указанием моделей
-seeding --weights models/bestDetectNew.pt --classify-weights models/bestKlassSegFlip180.pt
-
-# Через env
-YOLO_WEIGHTS_PATH=models/bestDetectNew.pt seeding
-SEEDING_DB_PATH=/data/mydb.sqlite3 seeding
+```powershell
+seeding-users create admin
+seeding-users list
+seeding-users set-password admin
+seeding-users delete admin
 ```
 
-### Модели YOLO
+Passwords are stored as PBKDF2-HMAC-SHA256 hashes. Plain passwords are not saved.
 
-| Файл | Назначение |
-|------|-----------|
-| `models/bestDetectNew.pt` | Детекция сеянцев (дефолт) |
-| `models/bestKlassSegFlip180.pt` | Классификация частей + маски (дефолт) |
-| `models/bestKlassSeg.pt` | Альтернативный классификатор |
+## Running The App
 
-> Файлы весов не хранятся в репозитории (`.gitignore`). Получите их отдельно.
-> Подробнее о локальных моделях, датасетах и правилах хранения артефактов:
-> [docs/ARTIFACTS.md](docs/ARTIFACTS.md).
-
-### Пороговые значения (`seeding/config.py`)
-
-| Параметр | Значение |
-|---------|---------|
-| Порог уверенности (confidence) | 0.25 |
-| IoU для NMS | 0.40 |
-| Высокая уверенность (зелёный) | >= 0.90 |
-| Низкая уверенность (красный) | < 0.50 |
-
----
-
-## Рабочий процесс
-
-1. Запустить приложение и войти (`seeding`)
-2. Открыть изображение или PDF (`Ctrl+O`)
-3. Запустить детекцию (`Ctrl+F` — текущая страница, `Ctrl+Shift+F` — все)
-4. Выбрать найденный сеянец в дереве слоёв
-5. Классифицировать части (`Ctrl+C`)
-6. При необходимости: повернуть (`Ctrl+R`), отредактировать bbox на холсте
-7. Проверить статистику в правой панели
-8. Сформировать PDF-отчёт (`Ctrl+P`)
-
----
-
-## Горячие клавиши
-
-| Клавиши | Действие |
-|---------|---------|
-| `Ctrl+O` | Открыть файл |
-| `Ctrl+Shift+O` | Добавить файлы к проекту |
-| `Ctrl+F` | Детекция на текущей странице |
-| `Ctrl+Shift+F` | Детекция на всех страницах |
-| `Ctrl+C` | Классификация выбранного объекта |
-| `Ctrl+R` | Повернуть страницу/объект на 90° |
-| `Ctrl+P` | Сформировать PDF-отчёт |
-| `Ctrl++` / `Ctrl+-` | Масштаб + / - |
-| `Ctrl+0` | Сбросить масштаб |
-| Колесо мыши | Масштабирование холста |
-| ПКМ + drag | Панорамирование |
-
----
-
-## Управление пользователями
-
-```bash
-seeding-users create alice        # создать (пароль интерактивно)
-seeding-users list                # список пользователей
-seeding-users set-password alice  # сменить пароль
-seeding-users delete alice        # удалить
-seeding-users delete alice --yes  # удалить без подтверждения
+```powershell
+seeding
 ```
 
-**Формат логина:** 3–50 символов, `a-z 0-9 . - _`, регистронезависим.  
-**Пароль:** PBKDF2-HMAC-SHA256, 120 000 итераций, случайная соль. Никогда не хранится в открытом виде.
+Typical workflow:
 
-### Действия в аудит-логе
+1. Log in.
+2. Open an image or PDF.
+3. Rotate the page if needed.
+4. Run seedling detection.
+5. Run segmentation for new or selected seedlings.
+6. Review boxes, masks, statistics, and details.
+7. Correct annotations manually if needed.
+8. Save the session.
+9. Restore the session later from the session picker.
+10. Generate a PDF report.
 
-`login` · `logout` · `detect_page` · `detect_all` · `classify` · `generate_report` · `rotate`
+## Session Persistence
 
----
+Sessions are stored in SQLite. A saved session contains:
 
-## Архитектура
+- source file paths for every page;
+- page rotation state;
+- calibration value;
+- detected seedling bboxes;
+- crop rotation state;
+- orientation uncertainty flag;
+- manual annotation flags;
+- plant part bboxes;
+- polygon masks;
+- bitmap masks for accurate thin structures;
+- last generated report path.
 
-Трёхслойная архитектура без серверной части:
+When a session is restored, Seeding reloads the original source files, reapplies
+saved page rotations, rebuilds crop images from saved bboxes, and restores saved
+part masks. If a source file is missing, the session metadata is still loaded and
+the UI shows which source path could not be found.
 
-```
-UI Layer     →  seeding/ui/
-Service      →  seeding/services.py, user_service.py, report.py
-Data         →  seeding/database.py (SQLite), seeding/data/
-```
+## Main Controls
 
-Подробное описание: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+| Action | Shortcut / Place |
+| --- | --- |
+| Open files | `Ctrl+O` |
+| Add files | `Ctrl+Shift+O` |
+| Open saved session | `Ctrl+Alt+O` |
+| Detect on current page | `Ctrl+F` |
+| Detect on all/new pages | toolbar split button |
+| Segment selected/new/all seedlings | toolbar split button or Analysis menu |
+| Rotate page or selected crop | `Ctrl+R` |
+| Save session | `Ctrl+S` |
+| Generate report | `Ctrl+P` |
+| Zoom in/out | `Ctrl++`, `Ctrl+-` |
+| Fit image | `Ctrl+0` |
+| Measurement mode | `M` |
+| Delete selected annotation | `Delete` in bbox edit mode |
+| Cancel drawing/measurement | `Esc` |
 
-### Ключевые модули
+## Testing And Quality Checks
 
-| Файл | Роль |
-|------|------|
-| `main.py` | Точка входа, `SessionController` |
-| `config.py` | Все константы и пороги |
-| `models.py` | Доменные dataclass-ы: `AppState`, `ObjectImage`, `AllClassImage` |
-| `services.py` | `run_detection()`, `run_classification_for_selection()`, `rotate_selection()` |
-| `inference.py` | ABC `InferenceBackend`, `TorchYoloBackend` |
-| `auth.py` | PBKDF2, `hash_password()`, `verify_password()` |
-| `database.py` | SQLite CRUD, `DatabaseError` |
-| `user_service.py` | Валидация, CRUD, иерархия исключений |
-| `report.py` | PDF через ReportLab |
-| `ui/main_window.py` | Главное окно (~2000 LOC) |
-| `utils/geometry.py` | NMS, повороты bbox/полигонов |
+Run the same checks before pushing changes:
 
----
-
-## Тестирование
-
-```bash
-pytest tests/                                      # все тесты
-pytest tests/ --cov=seeding --cov-report=term-missing  # с покрытием
-pytest tests/test_auth.py -v                       # один файл
-```
-
-| Модуль | Статус |
-|--------|--------|
-| `auth.py`, `user_service.py` | покрыто |
-| `inference.py` | покрыто |
-| `ui/` компоненты (дерево, статистика, иконки) | покрыто |
-| `ui/main_window.py` — интеграционные | покрыто |
-| `utils/geometry.py` | **не покрыто** |
-| `report.py` | **не покрыто** |
-
----
-
-## Структура проекта
-
-```
-Seeding/
-├── seeding/                # основной пакет
-│   ├── ui/                 # PyQt5 компоненты
-│   ├── utils/              # геометрия, пути
-│   ├── resources/          # иконки SVG, QSS-стили
-│   ├── data/               # schema.sql, seeding.sqlite3
-│   ├── main.py             # точка входа
-│   ├── config.py           # константы
-│   ├── models.py           # доменные модели
-│   ├── services.py         # бизнес-логика
-│   ├── inference.py        # абстракция YOLO
-│   ├── auth.py             # хэширование паролей
-│   ├── database.py         # SQLite CRUD
-│   ├── user_service.py     # сервис пользователей
-│   ├── report.py           # генерация PDF
-│   └── mask_refiner.py     # обработка масок
-├── tests/                  # pytest
-├── models/                 # веса YOLO .pt (не в git)
-├── dataset/                # датасеты YOLO (не в git)
-├── docs/                   # архитектура, ТЗ, диаграммы
-├── scripts/                # скрипты обучения
-└── CHANGELOG.md
+```powershell
+python -m compileall -q seeding tests
+python -m ruff check seeding tests
+python -m pytest tests -q
 ```
 
----
+Current suite covers:
 
-## Ограничения
+- authentication and local users;
+- SQLite schema and migrations;
+- session save/load/restore;
+- page rotation persistence;
+- bitmap mask persistence;
+- manual annotation flags;
+- image/PDF loading helpers;
+- inference adapters;
+- mask refinement and contour conversion;
+- report generation;
+- UI behavior around the main window, tree, statistics, dialogs, and annotations.
 
-- Файлы весов `.pt` необходимы для работы — не включены в репозиторий
-- Инференс YOLO в основном потоке — UI временно зависает на больших PDF
-- Нет undo/redo для трансформаций изображений
-- Только локальный однопользовательский режим
-- Только формат `.pt` (Ultralytics/PyTorch), ONNX не поддерживается
+## Development Notes
 
----
+- Keep generated files, local photos, model weights, and temporary artifacts out of git.
+- Prefer focused tests for every session, rotation, mask, and annotation change.
+- Be careful with `seeding/ui/main_window.py`: it owns a lot of UI orchestration and is easy to break during merges.
+- Session restore depends on source files still existing at their saved paths.
+- If a database already exists, `database.initialize_database()` applies lightweight migrations for new columns.
 
-## Авторы
+## Git Hygiene
 
-**Валеев Алексей** — [@diristhor](https://t.me/diristhor)  
-**Анна Алехина** — [@Carthago_delenda_es](https://t.me/Carthago_delenda_es)
+The intended tracked project surface is:
 
----
+```text
+seeding/
+tests/
+README.md
+pyproject.toml
+.gitignore
+.gitattributes
+```
 
-История изменений: [CHANGELOG.md](CHANGELOG.md)
+Local folders such as `models/`, `Photo/`, caches, reports, and database files should stay untracked unless there is a deliberate reason to add them.
